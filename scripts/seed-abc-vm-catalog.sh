@@ -104,11 +104,16 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     exit 1
   fi
 
-  echo "Uploading ${FILE_NAME} as ${CATALOG_NAMESPACE}/${DV_NAME}..."
+  # virtctl expects lowercase volume-mode values
+  VOLUME_MODE_LOWER="$(echo "${VOLUME_MODE}" | tr '[:upper:]' '[:lower:]')"
+
+  echo "Uploading ${FILE_NAME} as ${CATALOG_NAMESPACE}/${DV_NAME} (volumeMode=${VOLUME_MODE_LOWER})..."
   virtctl image-upload dv "${DV_NAME}" \
     --namespace="${CATALOG_NAMESPACE}" \
     --size="${PVC_SIZE}" \
     --storage-class="${STORAGE_CLASS}" \
+    --volume-mode="${VOLUME_MODE_LOWER}" \
+    --access-mode=ReadWriteOnce \
     --image-path="${IMAGE_PATH}" \
     --wait-secs=86400
 
