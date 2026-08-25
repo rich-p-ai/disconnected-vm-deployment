@@ -1,13 +1,22 @@
+# Appliance disk images
+*.raw
+*.img
+*.qcow2
+*.iso
+*.tar
+
 # Secrets, credentials, and cluster identity — never commit
 **/*secret*
 !**/*.example
 !examples/pull-secret.json.example
+*pull-secret*
 pull-secret.json
 kubeconfig
 *.kubeconfig
 .env
 *.pem
 *.key
+auth.json
 
 # Local ansible / oc-mirror artifacts
 *.retry
@@ -15,6 +24,3 @@ __pycache__/
 .venv/
 oc-mirror-workspace/
 working-dir/
-*.tar
-*.iso
-auth.json

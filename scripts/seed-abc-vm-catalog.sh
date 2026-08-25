@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  seed-abc-vm-catalog.sh \
+    --bundle <abc-vm-bundle-directory> \
+    --storage-class <destination-storage-class> \
+    [--catalog-namespace <namespace>]
+
+Example:
+  seed-abc-vm-catalog.sh \
+    --bundle /srv/abc-vm/releases/abc-vm-1.0.0 \
+    --storage-class ocs-storagecluster-ceph-rbd \
+    --catalog-namespace vm-catalog
+EOF
+}
+
+require_commands() {
+  local command
+  for command in bash oc virtctl awk cut grep sed sha256sum mkdir; do
+    command -v "${command}" >/dev/null 2>&1 || {
+      echo "ERROR: Required command is missing: ${command}" >&2
+      exit 127
+    }
+  done
+}
+
+BUNDLE=""
+STORAGE_CLASS=""
+CATALOG_NAMESPACE_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bundle) BUNDLE="$2"; shift 2 ;;
+    --storage-class) STORAGE_CLASS="$2"; shift 2 ;;
+    --catalog-namespace) CATALOG_NAMESPACE_OVERRIDE="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+require_commands
+
+[[ -n "${BUNDLE}" && -n "${STORAGE_CLASS}" ]] || {
+  usage
+  exit 2
+}
+
+[[ -f "${BUNDLE}/release.env" ]] || { echo "ERROR: Missing release.env" >&2; exit 1; }
+[[ -f "${BUNDLE}/disks.tsv" ]] || { echo "ERROR: Missing disks.tsv" >&2; exit 1; }
+[[ -f "${BUNDLE}/checksums.sha256" ]] || { echo "ERROR: Missing checksums.sha256" >&2; exit 1; }
+
+# release.env is produced by the trusted build script. Do not source untrusted bundles.
+source "${BUNDLE}/release.env"
+
+CATALOG_NAMESPACE="${CATALOG_NAMESPACE_OVERRIDE:-${CATALOG_NAMESPACE:-vm-catalog}}"
+RELEASE_ID="${APP_ID}-${VERSION//[^a-zA-Z0-9-]/-}"
+
+oc whoami >/dev/null
+oc get storageclass "${STORAGE_CLASS}" >/dev/null
+
+if ! oc api-resources --api-group=cdi.kubevirt.io -o name | grep -qx 'datavolumes'; then
+  echo "ERROR: CDI DataVolume API is unavailable." >&2
+  exit 1
+fi
+
+echo "Destination context: $(oc config current-context)"
+echo "Catalog namespace: ${CATALOG_NAMESPACE}"
+echo "Release: ${RELEASE_ID}"
+
+echo "Verifying disk checksums..."
+(
+  cd "${BUNDLE}"
+  sha256sum -c checksums.sha256
+)
+
+if ! oc get namespace "${CATALOG_NAMESPACE}" >/dev/null 2>&1; then
+  oc new-project "${CATALOG_NAMESPACE}"
+fi
+
+while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
+  [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
+
+  IMAGE_PATH="${BUNDLE}/${FILE_NAME}"
+  DV_NAME="${RELEASE_ID}-${ROLE}"
+
+  [[ -f "${IMAGE_PATH}" ]] || {
+    echo "ERROR: Missing image file ${IMAGE_PATH}" >&2
+    exit 1
+  }
+
+  if oc get dv "${DV_NAME}" -n "${CATALOG_NAMESPACE}" >/dev/null 2>&1; then
+    PHASE="$(oc get dv "${DV_NAME}" -n "${CATALOG_NAMESPACE}" -o jsonpath='{.status.phase}')"
+
+    if [[ "${PHASE}" == "Succeeded" ]]; then
+      echo "Catalog DataVolume already exists and is ready: ${DV_NAME}"
+      continue
+    fi
+
+    echo "ERROR: Catalog DataVolume ${DV_NAME} already exists in phase ${PHASE}." >&2
+    echo "Resolve or delete it manually before retrying." >&2
+    exit 1
+  fi
+
+  echo "Uploading ${FILE_NAME} as ${CATALOG_NAMESPACE}/${DV_NAME}..."
+  virtctl image-upload dv "${DV_NAME}" \
+    --namespace="${CATALOG_NAMESPACE}" \
+    --size="${PVC_SIZE}" \
+    --storage-class="${STORAGE_CLASS}" \
+    --image-path="${IMAGE_PATH}" \
+    --wait-secs=86400
+
+  PHASE="$(oc get dv "${DV_NAME}" -n "${CATALOG_NAMESPACE}" -o jsonpath='{.status.phase}')"
+  [[ "${PHASE}" == "Succeeded" ]] || {
+    echo "ERROR: Upload did not complete successfully for ${DV_NAME}; phase=${PHASE}" >&2
+    exit 1
+  }
+
+  oc label pvc "${DV_NAME}" -n "${CATALOG_NAMESPACE}" \
+    "abcvm.io/app=${APP_ID}" \
+    "abcvm.io/version=${VERSION}" \
+    "abcvm.io/role=${ROLE}" \
+    --overwrite
+
+done < "${BUNDLE}/disks.tsv"
+
+BOOT_DV_NAME="${RELEASE_ID}-boot"
+
+cat <<EOF | oc apply -f -
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataSource
+metadata:
+  name: ${RELEASE_ID}
+  namespace: ${CATALOG_NAMESPACE}
+  labels:
+    abcvm.io/app: ${APP_ID}
+    abcvm.io/version: "${VERSION}"
+spec:
+  source:
+    pvc:
+      name: ${BOOT_DV_NAME}
+      namespace: ${CATALOG_NAMESPACE}
+EOF
+
+echo
+echo "Catalog seed completed successfully."
+oc get dv,pvc,datasource -n "${CATALOG_NAMESPACE}" -l "abcvm.io/app=${APP_ID}"
