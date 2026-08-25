@@ -2,7 +2,9 @@
 
 Offline package for deploying an ABC VM on disconnected OpenShift Virtualization.
 
-A platform engineer packages an existing VM once. End users then clone that catalog image into their own project. Work is done from an OpenShift bastion with Bash, `oc`, `virtctl`, and standard GNU utilities. Deployment does not require Internet access, Helm, Python, Ansible, `jq`, `yq`, an SMB share, or an HTTP server.
+A platform engineer packages an existing VM once. The disks are transferred offline and seeded as versioned DataVolumes + a DataSource in a protected catalog namespace. End users then clone from that DataSource into their own project.
+
+Work is done from an OpenShift bastion with Bash, `oc`, `virtctl`, and standard GNU utilities. No Internet access, Helm, Python, Ansible, `jq`, `yq`, SMB share, or HTTP server is required.
 
 ## Guides
 
@@ -16,8 +18,8 @@ A platform engineer packages an existing VM once. End users then clone that cata
 | Script | Role |
 | --- | --- |
 | [`scripts/build-abc-vm-package.sh`](scripts/build-abc-vm-package.sh) | Export a stopped source VM into a versioned bundle |
-| [`scripts/seed-abc-vm-catalog.sh`](scripts/seed-abc-vm-catalog.sh) | Upload bundle disks once into the protected `vm-catalog` namespace |
-| [`scripts/deploy-abc-vm.sh`](scripts/deploy-abc-vm.sh) | Clone catalog disks and create a VM in an end-user namespace |
+| [`scripts/seed-abc-vm-catalog.sh`](scripts/seed-abc-vm-catalog.sh) | Upload disks and create the catalog DataSource |
+| [`scripts/deploy-abc-vm.sh`](scripts/deploy-abc-vm.sh) | Clone from DataSource / catalog PVCs and create a VM |
 
 Copy the three scripts to the bastion, mark them executable (`chmod 0750`), and follow the matching guide.
 
