@@ -101,7 +101,25 @@ oc get vm "${VM}" -n "${NS}" \
   exit 1
 }
 
-: > "${BUNDLE}/disks.tsv"
+# Prefer a volume whose name suggests the OS disk; otherwise use the first PVC.
+BOOT_VOLUME=""
+while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
+  [[ -n "${VOLUME_NAME}" && -n "${PVC_NAME}" ]] || continue
+  LOWER="$(echo "${VOLUME_NAME}" | tr '[:upper:]' '[:lower:]')"
+  case "${LOWER}" in
+    *root*|*boot*|*os*|*system*)
+      BOOT_VOLUME="${VOLUME_NAME}"
+      break
+      ;;
+  esac
+done < "${BUNDLE}/source-disks.tsv"
+
+if [[ -z "${BOOT_VOLUME}" ]]; then
+  BOOT_VOLUME="$(awk -F$'\t' 'NF>=1 {print $1; exit}' "${BUNDLE}/source-disks.tsv")"
+fi
+
+echo "Selected boot volume: ${BOOT_VOLUME}"
+echo "# role<TAB>volume_name<TAB>file<TAB>pvc_size<TAB>volume_mode" > "${BUNDLE}/disks.tsv"
 
 while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
   [[ -n "${VOLUME_NAME}" && -n "${PVC_NAME}" ]] || continue
@@ -110,9 +128,10 @@ while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
   VOLUME_MODE="$(oc get pvc "${PVC_NAME}" -n "${NS}" -o jsonpath='{.spec.volumeMode}')"
   [[ -n "${VOLUME_MODE}" ]] || VOLUME_MODE="Filesystem"
 
-  ROLE="data"
-  if [[ ! -s "${BUNDLE}/disks.tsv" ]]; then
+  if [[ "${VOLUME_NAME}" == "${BOOT_VOLUME}" ]]; then
     ROLE="boot"
+  else
+    ROLE="data"
   fi
 
   FILE_NAME="${VOLUME_NAME}.raw"
@@ -120,6 +139,11 @@ while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
     "${ROLE}" "${VOLUME_NAME}" "${FILE_NAME}" "${PVC_SIZE}" "${VOLUME_MODE}" \
     >> "${BUNDLE}/disks.tsv"
 done < "${BUNDLE}/source-disks.tsv"
+
+# Ensure exactly one boot role; if none matched (edge case), force first line
+if ! grep -q $'^boot\t' "${BUNDLE}/disks.tsv"; then
+  sed -i '1s/^data\t/boot\t/' "${BUNDLE}/disks.tsv" || true
+fi
 
 cat > "${BUNDLE}/release.env" <<EOF
 APP_NAME="ABC VM"
@@ -194,3 +218,4 @@ echo
 echo "ABC VM bundle created successfully: ${BUNDLE}"
 echo "Validate bundle contents with:"
 echo "  cd ${BUNDLE} && sha256sum -c checksums.sha256"
+echo "Confirm the boot disk role in disks.tsv before transfer."
