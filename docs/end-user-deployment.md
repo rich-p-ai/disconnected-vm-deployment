@@ -2,7 +2,12 @@
 
 This guide explains how to deploy a new **ABC VM** instance into a disconnected OpenShift Virtualization cluster.
 
-Use this guide only after a platform administrator has seeded the required ABC VM version into the cluster catalog. The deployment requires no Internet access, SMB share, HTTP server, Helm, Python, Ansible, `jq`, or `yq`.
+Use this guide only after a platform administrator has:
+
+1. Seeded the required ABC VM version into the cluster catalog, and
+2. Granted you (or your service account) cross-namespace clone permissions for the catalog.
+
+The deployment requires no Internet access, SMB share, HTTP server, Helm, Python, Ansible, `jq`, or `yq`.
 
 The deployment script uses only:
 
@@ -33,7 +38,7 @@ Your account (or the deployment service account) must be allowed to:
 - Create `DataVolume` and `VirtualMachine` objects in the target namespace.
 - Clone from the catalog **DataSource** and from the catalog PVCs in `vm-catalog`.
 
-If you receive a permissions error, contact the platform administrator. Never modify objects in the catalog namespace.
+Administrators use the sample at [`manifests/rbac-catalog-clone.yaml`](../manifests/rbac-catalog-clone.yaml). If you receive a permissions error, contact the platform administrator. Never modify objects in the catalog namespace.
 
 ---
 
@@ -192,7 +197,7 @@ oc get events -n user-project --sort-by=.lastTimestamp
 Typical causes: DataSource not Ready, missing cross-namespace RBAC, storage class does not support the volume mode / access mode, insufficient capacity, or catalog object missing.
 
 **Permission denied**  
-Your identity lacks create or clone rights. Contact the platform administrator.
+Your identity lacks create or clone rights. Ask the platform administrator to apply or adjust [`manifests/rbac-catalog-clone.yaml`](../manifests/rbac-catalog-clone.yaml).
 
 **VM does not boot**  
 Check events, confirm the boot disk is correct, and verify guest drivers / licensing / certificates.
