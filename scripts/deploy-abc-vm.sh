@@ -34,6 +34,16 @@ require_commands() {
   done
 }
 
+# Catalog / target object name suffix: boot stays "boot"; other disks use sanitized volume name
+disk_suffix() {
+  local role="$1" volume_name="$2"
+  if [[ "${role}" == "boot" ]]; then
+    echo "boot"
+  else
+    echo "${volume_name}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//'
+  fi
+}
+
 BUNDLE=""
 TARGET_NAMESPACE=""
 VM_NAME=""
@@ -121,7 +131,9 @@ DISK_YAML=""
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
 
-  TARGET_DV="${VM_NAME}-${ROLE}"
+  SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
+  TARGET_DV="${VM_NAME}-${SUFFIX}"
+  VOL_NAME="${SUFFIX}"
 
   if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
      oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
@@ -157,8 +169,8 @@ spec:
         storage: ${PVC_SIZE}
 EOF
   else
-    # Data disks: clone from the corresponding catalog PVC
-    SOURCE_PVC="${RELEASE_ID}-${ROLE}"
+    # Data disks: clone from the corresponding catalog PVC (named by volume)
+    SOURCE_PVC="${RELEASE_ID}-${SUFFIX}"
     oc get pvc "${SOURCE_PVC}" -n "${CATALOG_NAMESPACE}" >/dev/null || {
       echo "ERROR: Source catalog PVC does not exist: ${CATALOG_NAMESPACE}/${SOURCE_PVC}" >&2
       exit 1
@@ -191,18 +203,19 @@ spec:
 EOF
   fi
 
-  VOLUME_YAML+="        - name: ${ROLE}\n          persistentVolumeClaim:\n            claimName: ${TARGET_DV}\n"
+  VOLUME_YAML+="        - name: ${VOL_NAME}\n          persistentVolumeClaim:\n            claimName: ${TARGET_DV}\n"
 
   if [[ "${ROLE}" == "boot" ]]; then
-    DISK_YAML+="            - name: ${ROLE}\n              disk:\n                bus: virtio\n              bootOrder: 1\n"
+    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: virtio\n              bootOrder: 1\n"
   else
-    DISK_YAML+="            - name: ${ROLE}\n              disk:\n                bus: virtio\n"
+    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: virtio\n"
   fi
 done < "${BUNDLE}/disks.tsv"
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
-  TARGET_DV="${VM_NAME}-${ROLE}"
+  SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
+  TARGET_DV="${VM_NAME}-${SUFFIX}"
 
   echo "Waiting for cloned DataVolume ${TARGET_NAMESPACE}/${TARGET_DV}..."
   oc wait dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" \
