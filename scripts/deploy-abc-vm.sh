@@ -96,10 +96,17 @@ if ! oc api-resources --api-group=cdi.kubevirt.io -o name | grep -qx 'datavolume
   exit 1
 fi
 
+# Prefer DataSource for the boot image (standard CDI catalog pattern)
+if ! oc get datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >/dev/null 2>&1; then
+  echo "ERROR: Catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} not found. Run seed first." >&2
+  exit 1
+fi
+
 echo "Target context: $(oc config current-context)"
 echo "Target namespace: ${TARGET_NAMESPACE}"
 echo "VM name: ${VM_NAME}"
 echo "Catalog namespace: ${CATALOG_NAMESPACE}"
+echo "Using DataSource: ${RELEASE_ID}"
 
 VOLUME_YAML=""
 DISK_YAML=""
@@ -107,13 +114,7 @@ DISK_YAML=""
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
 
-  SOURCE_PVC="${RELEASE_ID}-${ROLE}"
   TARGET_DV="${VM_NAME}-${ROLE}"
-
-  oc get pvc "${SOURCE_PVC}" -n "${CATALOG_NAMESPACE}" >/dev/null || {
-    echo "ERROR: Source catalog PVC does not exist: ${CATALOG_NAMESPACE}/${SOURCE_PVC}" >&2
-    exit 1
-  }
 
   if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
      oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
@@ -121,7 +122,42 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     exit 1
   fi
 
-  cat <<EOF | oc apply -f -
+  if [[ "${ROLE}" == "boot" ]]; then
+    # Standard pattern: clone from catalog DataSource
+    cat <<EOF | oc apply -f -
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ${TARGET_DV}
+  namespace: ${TARGET_NAMESPACE}
+  labels:
+    abcvm.io/app: ${APP_ID}
+    abcvm.io/version: "${VERSION}"
+    abcvm.io/role: ${ROLE}
+    abcvm.io/vm: ${VM_NAME}
+spec:
+  source:
+    dataSource:
+      name: ${RELEASE_ID}
+      namespace: ${CATALOG_NAMESPACE}
+  storage:
+    storageClassName: ${STORAGE_CLASS}
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: ${VOLUME_MODE}
+    resources:
+      requests:
+        storage: ${PVC_SIZE}
+EOF
+  else
+    # Data disks: clone from the corresponding catalog PVC
+    SOURCE_PVC="${RELEASE_ID}-${ROLE}"
+    oc get pvc "${SOURCE_PVC}" -n "${CATALOG_NAMESPACE}" >/dev/null || {
+      echo "ERROR: Source catalog PVC does not exist: ${CATALOG_NAMESPACE}/${SOURCE_PVC}" >&2
+      exit 1
+    }
+
+    cat <<EOF | oc apply -f -
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
@@ -146,6 +182,7 @@ spec:
       requests:
         storage: ${PVC_SIZE}
 EOF
+  fi
 
   VOLUME_YAML+="        - name: ${ROLE}\n          persistentVolumeClaim:\n            claimName: ${TARGET_DV}\n"
 
