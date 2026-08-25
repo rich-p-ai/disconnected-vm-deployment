@@ -171,6 +171,7 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     --namespace="${NS}" \
     --volume="${VOLUME_NAME}" \
     --output="${OUTPUT_FILE}" \
+    --format=raw \
     --keep-vme
 
 done < "${BUNDLE}/disks.tsv"
