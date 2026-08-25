@@ -1,0 +1,97 @@
+# Sample RBAC for ABC VM catalog cloning
+#
+# Apply as cluster-admin on the disconnected cluster BEFORE end users deploy.
+#
+# What this grants:
+# - Ability to use catalog objects in vm-catalog as clone sources
+#   (DataSource for boot, PVC for data disks)
+# - Read access to DataSources and PVCs in the catalog namespace
+#
+# Customize:
+# - SUBJECTS: replace with your users, groups, or service accounts
+# - CATALOG_NAMESPACE: change if you do not use vm-catalog
+#
+# Official pattern: datavolumes/source is the CDI permission required
+# for cross-namespace clone. See OpenShift Virtualization docs:
+# "Enabling user permissions to clone data volumes across namespaces"
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: abc-vm-catalog-cloner
+  labels:
+    app.kubernetes.io/name: abc-vm
+    abcvm.io/component: catalog-rbac
+rules:
+  # Required for CDI to accept a DataVolume that sources from another namespace
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datavolumes/source"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: abc-vm-catalog-reader
+  namespace: vm-catalog
+  labels:
+    app.kubernetes.io/name: abc-vm
+    abcvm.io/component: catalog-rbac
+rules:
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datasources", "datavolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+---
+# Example RoleBinding: allow a specific user to clone from the catalog.
+# Duplicate / edit subjects for groups or service accounts as needed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: abc-vm-allow-catalog-clone
+  namespace: vm-catalog
+  labels:
+    app.kubernetes.io/name: abc-vm
+    abcvm.io/component: catalog-rbac
+subjects:
+  # --- User example ---
+  - kind: User
+    name: end-user@example.com
+    apiGroup: rbac.authorization.k8s.io
+  # --- Group example (uncomment and set) ---
+  # - kind: Group
+  #   name: abc-vm-deployers
+  #   apiGroup: rbac.authorization.k8s.io
+  # --- ServiceAccount example (uncomment and set) ---
+  # - kind: ServiceAccount
+  #   name: default
+  #   namespace: user-project
+roleRef:
+  kind: ClusterRole
+  name: abc-vm-catalog-cloner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: abc-vm-allow-catalog-read
+  namespace: vm-catalog
+  labels:
+    app.kubernetes.io/name: abc-vm
+    abcvm.io/component: catalog-rbac
+subjects:
+  - kind: User
+    name: end-user@example.com
+    apiGroup: rbac.authorization.k8s.io
+  # - kind: Group
+  #   name: abc-vm-deployers
+  #   apiGroup: rbac.authorization.k8s.io
+  # - kind: ServiceAccount
+  #   name: default
+  #   namespace: user-project
+roleRef:
+  kind: Role
+  name: abc-vm-catalog-reader
+  apiGroup: rbac.authorization.k8s.io
