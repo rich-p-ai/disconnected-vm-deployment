@@ -1,21 +1,21 @@
 # ABC VM Builder Guide
 
-This guide is for the engineer who packages an existing OpenShift Virtualization VM as an offline, reusable **ABC VM** appliance bundle.
+This guide is for the platform engineer who packages an existing OpenShift Virtualization VM as an offline, reusable **ABC VM** appliance for a disconnected cluster.
 
 The process uses only tools normally present on an OpenShift bastion:
 
 - Bash
 - `oc`
 - `virtctl`
-- standard GNU/Linux commands such as `awk`, `grep`, `sed`, `sha256sum`, and `find`
+- standard GNU/Linux commands (`awk`, `grep`, `sed`, `sha256sum`, `find`, etc.)
 
-No Helm, Python, Ansible, `jq`, `yq`, external repositories, Internet access, SMB mount, or HTTP server is required at deployment time.
+No Helm, Python, Ansible, `jq`, `yq`, external repositories, Internet access, SMB mount, or HTTP server is required after the initial packaging.
 
 ---
 
 ## 1. What this produces
 
-The build process creates a self-contained bundle that can be transferred to a disconnected OpenShift environment:
+The build process creates a self-contained offline bundle:
 
 ```text
 abc-vm-1.0.0/
@@ -27,61 +27,60 @@ abc-vm-1.0.0/
 ├── checksums.sha256
 ├── source-vm.yaml
 ├── source-pvcs.yaml
-├── bootdisk.raw
-└── datadisk.raw
+├── <volume>.raw          # one or more raw disk images
+└── ...
 ```
 
-The bundle has three roles:
+Roles of the three scripts:
 
-1. **Build**: Export a stopped source VM and its disks to the bastion.
-2. **Seed**: Upload the exported disks once into a protected catalog namespace on the disconnected cluster.
-3. **Deploy**: Clone catalog disks and create a new VM in an end-user namespace.
+1. **Build** – Export a stopped source VM and its disks to the bastion.
+2. **Seed** – Upload the disks as DataVolumes into a protected catalog namespace and create a versioned **DataSource** (the primary catalog object).
+3. **Deploy** – Clone a writable boot disk from the DataSource (and data disks from catalog PVCs) and create a VirtualMachine in an end-user namespace.
 
-The destination cluster does not need access to the source cluster, Internet, an SMB share, or a web server after the bundle is transferred to the destination bastion.
+After the bundle is transferred, the destination cluster needs no connectivity to the source cluster or the Internet.
 
 ---
 
-## 2. Architecture
+## 2. Architecture (CDI / DataSource pattern)
 
 ```text
-Source OpenShift cluster                         Destination disconnected cluster
-────────────────────────                         ──────────────────────────────
-Source VM                                        vm-catalog namespace
-  └─ PVC-backed disks                                 └─ Golden catalog DataVolumes/PVCs
-          │                                                    │
-          │ export to bastion                                  │ local clone
-          ▼                                                    ▼
-Bastion bundle                                           User namespace
-  /srv/abc-vm/abc-vm-1.0.0/                              ├─ Cloned boot PVC
-  ├─ bootdisk.raw                                        ├─ Cloned data PVC(s)
-  ├─ datadisk.raw                                        └─ ABC VM
-  ├─ release.env
-  └─ disks.tsv
+Source OpenShift cluster                    Destination disconnected cluster
+────────────────────────                    ──────────────────────────────
+Source VM                                   vm-catalog namespace
+  └─ PVC-backed disks                         ├─ DataVolume/<release>-boot
+          │                                   ├─ DataVolume/<release>-data
+          │ export (raw)                      ├─ PVC (golden images)
+          ▼                                   └─ DataSource/<release>   ← primary catalog object
+Bastion bundle                                         │
+  /srv/abc-vm/releases/abc-vm-1.0.0/                   │ clone
+  ├─ *.raw                                             ▼
+  ├─ release.env                                User namespace
+  ├─ disks.tsv                                    ├─ DataVolume/<vm>-boot   (from DataSource)
+  └─ scripts                                      ├─ DataVolume/<vm>-data   (from PVC)
+                                                  └─ VirtualMachine/<vm>
 ```
 
-The `vm-catalog` disks are **golden source images**. Do not start VMs directly from them and do not grant normal users permission to modify or delete them.
+The objects in `vm-catalog` are **golden source images**. Do not start VMs from them and do not grant normal users permission to modify or delete them.
 
 ---
 
 ## 3. Prerequisites
 
-### Source cluster requirements
+### Source cluster
 
-- OpenShift Virtualization is installed and healthy.
-- The source VM uses PVC-backed disks.
-- You have permission to stop the VM, read the VM/PVCs, and create/download `VirtualMachineExport` resources.
-- The source VM can be stopped for a consistent disk-level export.
+- OpenShift Virtualization installed and healthy.
+- Source VM uses PVC-backed disks.
+- Permission to stop the VM, read VM/PVCs, and create/download `VirtualMachineExport` resources.
+- VM can be fully stopped for a consistent export.
 
-### Destination cluster requirements
+### Destination cluster
 
-- OpenShift Virtualization and CDI are installed and healthy.
-- A suitable destination `StorageClass` is available.
-- The bastion can authenticate to the destination cluster API.
-- The bastion has adequate free space for the exported images.
+- OpenShift Virtualization and CDI installed and healthy.
+- Suitable destination `StorageClass` available.
+- Bastion can authenticate to the destination cluster API.
+- Bastion has enough free space for the exported images.
 
-### Bastion requirements
-
-Run the following checks:
+### Bastion tools
 
 ```bash
 for command in bash oc virtctl awk cut grep sed sha256sum find sort; do
@@ -95,58 +94,44 @@ oc version --client
 virtctl version --client || virtctl version
 ```
 
-Use a `virtctl` version compatible with the installed OpenShift Virtualization release.
+Use a `virtctl` version compatible with the OpenShift Virtualization release on both clusters.
 
 ---
 
-## 4. Create the project layout
-
-On the bastion that can access the source cluster:
+## 4. Project layout on the bastion
 
 ```bash
 mkdir -p /srv/abc-vm/scripts
 cd /srv/abc-vm/scripts
 ```
 
-Copy the three scripts from this repository’s `scripts/` directory onto the bastion and make them executable:
+Copy the three scripts from this repository’s `scripts/` directory and make them executable:
 
 ```bash
-chmod 0750 build-abc-vm-package.sh
-chmod 0750 seed-abc-vm-catalog.sh
-chmod 0750 deploy-abc-vm.sh
+chmod 0750 build-abc-vm-package.sh seed-abc-vm-catalog.sh deploy-abc-vm.sh
 ```
 
-Keep these scripts in source control. The build script copies the seed and deploy scripts into every generated VM bundle so that a transfer contains all required tooling.
+The build script automatically copies the seed and deploy scripts into every generated bundle.
 
 ---
 
-## 5. Build script
-
-Use [`scripts/build-abc-vm-package.sh`](../scripts/build-abc-vm-package.sh) from this repository. Copy that file to the bastion; do not recreate it by hand. The file in `scripts/` is the source of truth.
-
-
-### Important build notes
+## 5. Build notes
 
 - The source VM is stopped for an offline-consistent export.
-- The first PVC-backed disk is classified as the `boot` disk. If that is not correct, edit `disks.tsv` before transferring the bundle.
-- The script records the source PVC requested capacity and volume mode in `disks.tsv`.
-- The script writes SHA-256 checksums for every exported `.raw` file.
-- Use `--keep-export` only for troubleshooting. The normal default is to remove the temporary export object after the download completes.
+- Disks are downloaded with `--format=raw` (required to avoid gzip corruption).
+- The first PVC-backed disk is marked `boot` in `disks.tsv`. Edit the file if that is incorrect before transferring the bundle.
+- `disks.tsv` records PVC size and volumeMode (Block / Filesystem).
+- SHA-256 checksums are written for every `.raw` file.
+- Use `--keep-export` only for troubleshooting.
 
 ---
 
-## 6. Build the ABC VM bundle
-
-Set the source-cluster context on the bastion:
+## 6. Build the bundle
 
 ```bash
 oc config current-context
 oc whoami
-```
 
-Run the build script:
-
-```bash
 cd /srv/abc-vm/scripts
 
 ./build-abc-vm-package.sh \
@@ -156,7 +141,7 @@ cd /srv/abc-vm/scripts
   --output-dir /srv/abc-vm/releases
 ```
 
-Validate the resulting bundle:
+Validate:
 
 ```bash
 cd /srv/abc-vm/releases/abc-vm-1.0.0
@@ -165,30 +150,18 @@ cat release.env
 column -t -s $'\t' disks.tsv 2>/dev/null || cat disks.tsv
 ```
 
-If needed, edit `disks.tsv` so the correct operating-system disk has the `boot` role:
+Example `disks.tsv`:
 
 ```text
-# role<TAB>volume_name<TAB>file<TAB>pvc_size<TAB>volume_mode
 boot    rootdisk     rootdisk.raw     120Gi   Block
 data    datadisk     datadisk.raw     500Gi   Block
 ```
 
-Do not alter disk file names unless the matching `file` column is also changed.
-
 ---
 
-## 7. Catalog seed script
+## 7. Seed the catalog on the disconnected cluster
 
-Use [`scripts/seed-abc-vm-catalog.sh`](../scripts/seed-abc-vm-catalog.sh) from this repository. Copy that file to the bastion; do not recreate it by hand. The file in `scripts/` is the source of truth.
-
-
----
-
-## 8. Seed the disconnected cluster catalog
-
-Transfer the complete `abc-vm-<version>` directory to a bastion that can access the disconnected OpenShift cluster. Use your approved offline transfer process.
-
-On the destination bastion:
+Transfer the entire `abc-vm-<version>` directory to a bastion that can reach the destination cluster.
 
 ```bash
 cd /srv/abc-vm/releases/abc-vm-1.0.0
@@ -196,136 +169,104 @@ sha256sum -c checksums.sha256
 
 oc config current-context
 oc whoami
-```
 
-Seed the catalog using the target cluster storage class:
-
-```bash
 ./seed-abc-vm-catalog.sh \
   --bundle /srv/abc-vm/releases/abc-vm-1.0.0 \
   --storage-class ocs-storagecluster-ceph-rbd \
   --catalog-namespace vm-catalog
 ```
 
-Expected objects:
+The seed script:
+
+- Uploads each disk as a DataVolume (preserving volumeMode).
+- Labels the resulting PVCs.
+- Creates a **DataSource** named after the release (e.g. `abc-vm-1-0-0`) that points at the boot PVC. This is the primary catalog object.
+
+Verify:
 
 ```bash
-oc get dv,pvc,datasource -n vm-catalog
+oc get dv,pvc,datasource -n vm-catalog -l abcvm.io/app=abc-vm
 ```
 
-Example expected result:
+Expected objects (example):
 
 ```text
-NAME                              PHASE
-DataVolume/abc-vm-1-0-0-boot      Succeeded
-DataVolume/abc-vm-1-0-0-data      Succeeded
-
-NAME                              STATUS   VOLUME                                     CAPACITY
-PersistentVolumeClaim/abc-vm-1-0-0-boot   Bound    pvc-...                              120Gi
-PersistentVolumeClaim/abc-vm-1-0-0-data   Bound    pvc-...                              500Gi
-
-NAME                 AGE
+DataVolume/abc-vm-1-0-0-boot   Succeeded
+DataVolume/abc-vm-1-0-0-data   Succeeded
+PersistentVolumeClaim/abc-vm-1-0-0-boot   Bound
+PersistentVolumeClaim/abc-vm-1-0-0-data   Bound
 DataSource/abc-vm-1-0-0
 ```
 
-The catalog is now ready for user deployments. Do not delete or modify the catalog PVCs while users depend on this appliance release.
+Do not delete or modify the catalog objects while users depend on this release.
 
 ---
 
-## 9. Deployment script
+## 8. Catalog permissions
 
-Use [`scripts/deploy-abc-vm.sh`](../scripts/deploy-abc-vm.sh) from this repository. Copy that file to the bastion; do not recreate it by hand. The file in `scripts/` is the source of truth.
+Users (or their service accounts) need permission to:
 
+- Create DataVolumes and VirtualMachines in their own namespace.
+- Clone from the catalog DataSource and from the catalog PVCs in `vm-catalog`.
 
----
+Cross-namespace clone access is not granted by default. A cluster administrator must create the appropriate RBAC (typically a ClusterRole on `datavolumes/source` plus RoleBindings).
 
-## 10. Catalog permissions
-
-A user or deployment service account needs explicit permission to clone catalog PVCs from `vm-catalog` into its own project. Namespace isolation prevents this by default.
-
-A cluster administrator should grant only the required cross-namespace clone permissions according to the OpenShift Virtualization version and organizational RBAC policy.
-
-Validate the deployment identity before handing the procedure to users:
+Validate before handing the procedure to users:
 
 ```bash
 oc auth can-i create datavolumes.cdi.kubevirt.io -n user-project
 oc auth can-i create virtualmachines.kubevirt.io -n user-project
 ```
 
-Also test an actual clone into a non-production project. The source catalog namespace must remain protected from user modification.
+Also perform a real test clone into a non-production project. Keep the catalog namespace protected.
 
 ---
 
-## 11. Build validation checklist
+## 9. Build validation checklist
 
-Before releasing an ABC VM bundle:
-
-- Confirm `sha256sum -c checksums.sha256` succeeds.
-- Confirm every exported disk file is non-empty.
-- Confirm `disks.tsv` contains the correct boot disk and all data disks.
-- Confirm source guest shutdown was clean and application-consistent.
-- Transfer the bundle through the approved offline process.
-- Seed into a non-production disconnected cluster first.
-- Confirm every catalog DataVolume reaches `Succeeded`.
-- Deploy a test VM using the deployment script.
-- Confirm the guest boots, detects all disks, and the application works.
-- Validate network settings, DNS, certificates, application licensing, backups, and monitoring.
-- Record the tested OpenShift Virtualization version, storage class, and appliance version in your release notes.
+- `sha256sum -c checksums.sha256` succeeds.
+- Every exported disk is non-empty.
+- `disks.tsv` has the correct boot disk and all data disks.
+- Source guest was shut down cleanly.
+- Bundle transferred via approved offline process.
+- Seed succeeds; every catalog DataVolume reaches `Succeeded` and the DataSource exists.
+- Test deploy produces a working VM that boots, sees all disks, and runs the application.
+- Network, DNS, certificates, licensing, backups, and monitoring are validated.
+- Record the tested OpenShift Virtualization version, storage class, and appliance version.
 
 ---
 
-## 12. Troubleshooting
+## 10. Troubleshooting
 
-### VM export remains pending
-
-Check that the source VM is fully stopped and no pod is using the source PVCs:
+**Export stays pending**  
+Confirm the source VM is fully stopped and no pods are using the PVCs.
 
 ```bash
 oc get vmi -n source-project
-oc get virtualmachineexport -n source-project
-oc describe virtualmachineexport abc-vm-export-1-0-0 -n source-project
+oc describe virtualmachineexport <export-name> -n source-project
 ```
 
-### Disk upload fails or remains pending
-
-Check the DataVolume and importer pod events:
+**Upload fails or stays pending**  
+Check DataVolume events and confirm the storage class supports the requested volumeMode and access mode.
 
 ```bash
-oc get dv,pvc,pods -n vm-catalog
-oc describe dv abc-vm-1-0-0-boot -n vm-catalog
+oc describe dv <name> -n vm-catalog
 ```
 
-Verify that the destination storage class supports the requested access mode and volume mode.
+**Clone fails**  
+Almost always RBAC or storage-class incompatibility. Inspect the target DataVolume events.
 
-### Clone fails across namespaces
-
-This is typically an RBAC issue or a storage cloning compatibility issue. Check the DataVolume events:
-
-```bash
-oc describe dv abc-vm-01-boot -n user-project
-```
-
-Confirm the deployment identity has the required permissions and that the source and destination storage classes are supported by your selected cloning workflow.
-
-### VM does not boot
-
-- Confirm the disk marked `boot` in `disks.tsv` is the actual boot disk.
-- Confirm the imported disk’s `volumeMode` matches the source/guest expectations.
-- Confirm the VM’s disk bus is appropriate. The provided script uses `virtio`.
-- For Windows guests, verify VirtIO storage and network drivers are already installed in the guest.
-- Check VM events and launcher logs:
-
-```bash
-oc describe vm abc-vm-01 -n user-project
-oc get vmi -n user-project
-oc get pods -n user-project
-```
+**VM does not boot**  
+- Confirm the disk marked `boot` is correct.
+- Confirm volumeMode matches expectations.
+- The deploy script uses virtio; Windows guests need VirtIO drivers already present.
+- Check VM / VMI events and launcher logs.
 
 ---
 
-## 13. Versioning and retention
+## 11. Versioning and retention
 
-Use immutable version directories and catalog object names:
+Use immutable version directories and object names:
 
 ```text
 abc-vm-1.0.0
@@ -333,15 +274,6 @@ abc-vm-1.0.1
 abc-vm-2.0.0
 ```
 
-Do not overwrite an existing catalog release in place. Create a new release, validate it, then publish it for deployment.
+Never overwrite an existing catalog release. Create a new version, validate it, then publish it.
 
-Keep these items together for each release:
-
-- The disk image files.
-- `checksums.sha256`.
-- `release.env`.
-- `disks.tsv`.
-- The source VM and PVC metadata exports.
-- Release notes documenting the tested target cluster and storage configuration.
-
-Retain the golden catalog PVCs for as long as end users need to deploy that version.
+Retain the golden catalog PVCs and DataSource for as long as end users need that version.
