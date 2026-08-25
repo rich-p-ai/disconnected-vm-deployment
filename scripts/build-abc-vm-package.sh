@@ -103,8 +103,12 @@ oc get vm "${VM}" -n "${NS}" \
 
 # Prefer a volume whose name suggests the OS disk; otherwise use the first PVC.
 BOOT_VOLUME=""
+FIRST_VOLUME=""
 while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
   [[ -n "${VOLUME_NAME}" && -n "${PVC_NAME}" ]] || continue
+  if [[ -z "${FIRST_VOLUME}" ]]; then
+    FIRST_VOLUME="${VOLUME_NAME}"
+  fi
   LOWER="$(echo "${VOLUME_NAME}" | tr '[:upper:]' '[:lower:]')"
   case "${LOWER}" in
     *root*|*boot*|*os*|*system*)
@@ -115,7 +119,7 @@ while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
 done < "${BUNDLE}/source-disks.tsv"
 
 if [[ -z "${BOOT_VOLUME}" ]]; then
-  BOOT_VOLUME="$(awk -F$'\t' 'NF>=1 {print $1; exit}' "${BUNDLE}/source-disks.tsv")"
+  BOOT_VOLUME="${FIRST_VOLUME}"
 fi
 
 echo "Selected boot volume: ${BOOT_VOLUME}"
@@ -139,11 +143,6 @@ while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
     "${ROLE}" "${VOLUME_NAME}" "${FILE_NAME}" "${PVC_SIZE}" "${VOLUME_MODE}" \
     >> "${BUNDLE}/disks.tsv"
 done < "${BUNDLE}/source-disks.tsv"
-
-# Ensure exactly one boot role; if none matched (edge case), force first line
-if ! grep -q $'^boot\t' "${BUNDLE}/disks.tsv"; then
-  sed -i '1s/^data\t/boot\t/' "${BUNDLE}/disks.tsv" || true
-fi
 
 cat > "${BUNDLE}/release.env" <<EOF
 APP_NAME="ABC VM"
