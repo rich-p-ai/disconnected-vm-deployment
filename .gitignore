@@ -1,0 +1,20 @@
+# Secrets, credentials, and cluster identity — never commit
+**/*secret*
+!**/*.example
+!examples/pull-secret.json.example
+pull-secret.json
+kubeconfig
+*.kubeconfig
+.env
+*.pem
+*.key
+
+# Local ansible / oc-mirror artifacts
+*.retry
+__pycache__/
+.venv/
+oc-mirror-workspace/
+working-dir/
+*.tar
+*.iso
+auth.json

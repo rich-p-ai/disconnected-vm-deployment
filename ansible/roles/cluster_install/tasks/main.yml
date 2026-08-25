@@ -1,0 +1,18 @@
+---
+- name: State selected install method
+  ansible.builtin.debug:
+    msg: >-
+      Install method {{ cluster_install_method }} (abi|ipi).
+      ABI: openshift-install agent create image --dir {{ cluster_install_dir }}
+      IPI: openshift-install create cluster --dir {{ cluster_install_dir }}
+      Both require imageContentSources and additionalTrustBundle from the mirror.
+  tags:
+    - install
+    - dry_run
+
+- name: Skip live installer invocation in scaffold
+  ansible.builtin.debug:
+    msg: Scaffold will not invoke openshift-install. Follow docs/runbook.md.
+  tags:
+    - install
+    - dry_run

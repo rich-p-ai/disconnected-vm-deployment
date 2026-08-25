@@ -1,0 +1,15 @@
+---
+- name: Document required registry hostname
+  ansible.builtin.debug:
+    msg: "Expect Docker V2-2 registry at {{ mirror_registry_hostname }}:{{ mirror_registry_port }}"
+  tags:
+    - registry
+    - dry_run
+
+- name: Fail if a non-example registry was committed
+  ansible.builtin.fail:
+    msg: Use only *.example.internal placeholders in this public repository.
+  when: "'example.internal' not in mirror_registry_hostname"
+  tags:
+    - registry
+    - dry_run

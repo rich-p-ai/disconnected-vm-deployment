@@ -1,0 +1,23 @@
+---
+- name: Confirm example VirtualMachine manifest exists
+  ansible.builtin.stat:
+    path: "{{ first_vm_manifest }}"
+  register: first_vm_stat
+  tags:
+    - vm
+    - dry_run
+
+- name: Fail when example VM manifest is missing
+  ansible.builtin.fail:
+    msg: "{{ first_vm_manifest }} is missing"
+  when: not first_vm_stat.stat.exists
+  tags:
+    - vm
+    - dry_run
+
+- name: Remind namespace is example
+  ansible.builtin.debug:
+    msg: "First VM namespace placeholder is {{ first_vm_namespace }}"
+  tags:
+    - vm
+    - dry_run

@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: mirror_registry
+  author: example
+  description: Placeholder checks for an internal mirror registry
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - openshift
+    - disconnected
+dependencies: []

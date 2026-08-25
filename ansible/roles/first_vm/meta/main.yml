@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: first_vm
+  author: example
+  description: Placeholder first VirtualMachine apply
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - openshift
+    - disconnected
+dependencies: []

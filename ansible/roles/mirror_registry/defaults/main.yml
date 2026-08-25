@@ -1,0 +1,3 @@
+---
+mirror_registry_hostname: registry.example.internal
+mirror_registry_port: 8443

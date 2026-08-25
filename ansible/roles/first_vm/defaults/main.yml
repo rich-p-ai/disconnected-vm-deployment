@@ -1,0 +1,3 @@
+---
+first_vm_manifest: "{{ playbook_dir }}/../../examples/VirtualMachine.yaml"
+first_vm_namespace: example

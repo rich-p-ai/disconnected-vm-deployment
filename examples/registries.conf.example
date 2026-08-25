@@ -1,0 +1,23 @@
+# Placeholder /etc/containers/registries.conf (version 2 TOML).
+# Fact: ABI disconnected mirroring documents registries.conf v2 TOML from oc-mirror / oc adm release mirror.
+# https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/installing_an_on-premise_cluster_with_the_agent-based_installer/understanding-disconnected-installation-mirroring
+# Also used for oc-mirror v2 enclave workflows.
+# https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/disconnected_environments/about-installing-oc-mirror-v2
+
+unqualified-search-registries = ["registry.example.internal:8443"]
+
+[[registry]]
+prefix = ""
+location = "quay.io/openshift-release-dev/ocp-release"
+mirror-by-digest-only = true
+
+  [[registry.mirror]]
+  location = "registry.example.internal:8443/openshift/release"
+
+[[registry]]
+prefix = ""
+location = "registry.redhat.io"
+mirror-by-digest-only = true
+
+  [[registry.mirror]]
+  location = "registry.example.internal:8443"

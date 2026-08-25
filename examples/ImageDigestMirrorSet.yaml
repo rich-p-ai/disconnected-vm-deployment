@@ -1,0 +1,19 @@
+# Placeholder ImageDigestMirrorSet. Prefer applying oc-mirror v2
+# working-dir/cluster-resources output unchanged.
+# Fact: https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/disconnected_environments/about-installing-oc-mirror-v2
+# Fact: https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/config_apis/imagedigestmirrorset-config-openshift-io-v1
+---
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: example-digest-mirrors
+spec:
+  imageDigestMirrors:
+    - source: quay.io/openshift-release-dev/ocp-release
+      mirrors:
+        - registry.example.internal:8443/openshift/release
+      mirrorSourcePolicy: NeverContactSource
+    - source: registry.redhat.io/redhat
+      mirrors:
+        - registry.example.internal:8443/redhat
+      mirrorSourcePolicy: NeverContactSource

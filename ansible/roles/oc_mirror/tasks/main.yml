@@ -1,0 +1,39 @@
+---
+- name: Check oc-mirror plugin v2 is available
+  ansible.builtin.command:
+    argv:
+      - oc
+      - mirror
+      - --v2
+      - --help
+  register: oc_mirror_help
+  changed_when: false
+  failed_when: oc_mirror_help.rc != 0
+  tags:
+    - mirror
+    - dry_run
+
+- name: Dry-run oc-mirror v2 (no images copied)
+  ansible.builtin.command:
+    argv:
+      - oc
+      - mirror
+      - -c
+      - "{{ oc_mirror_config | default(oc_mirror_config_file) }}"
+      - "file://{{ oc_mirror_workspace | default(oc_mirror_workspace_dir) }}"
+      - --dry-run
+      - --v2
+  changed_when: false
+  tags:
+    - mirror
+    - dry_run
+
+- name: Skip live mirror unless explicitly requested
+  ansible.builtin.debug:
+    msg: >-
+      Live oc-mirror (disk or mirror-to-mirror) is not run by default.
+      Set oc_mirror_mode=disk or oc_mirror_mode=mirror after reviewing the dry-run mapping.
+      Target registry placeholder: {{ oc_mirror_registry_url }}
+  when: oc_mirror_mode == 'dry-run'
+  tags:
+    - mirror

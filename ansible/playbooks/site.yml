@@ -1,0 +1,52 @@
+---
+- name: Disconnected VM deployment scaffold
+  hosts: bastion
+  gather_facts: false
+  tags:
+    - always
+  tasks:
+    - name: Remind operators this is a placeholder run
+      ansible.builtin.debug:
+        msg: >-
+          No real hosts. Use --check --tags dry_run first.
+          Mirror registry placeholder is {{ mirror_registry }}.
+
+- name: Mirror release and operators with oc-mirror v2
+  hosts: bastion
+  gather_facts: false
+  tags:
+    - mirror
+  roles:
+    - role: oc_mirror
+
+- name: Ensure placeholder mirror registry is documented
+  hosts: registry
+  gather_facts: false
+  tags:
+    - registry
+  roles:
+    - role: mirror_registry
+
+- name: Install disconnected cluster (ABI and/or IPI)
+  hosts: bastion
+  gather_facts: false
+  tags:
+    - install
+  roles:
+    - role: cluster_install
+
+- name: Install OpenShift Virtualization disconnected
+  hosts: bastion
+  gather_facts: false
+  tags:
+    - virt
+  roles:
+    - role: virt_operator
+
+- name: Create first example VM
+  hosts: bastion
+  gather_facts: false
+  tags:
+    - vm
+  roles:
+    - role: first_vm

@@ -1,0 +1,5 @@
+---
+oc_mirror_mode: dry-run
+oc_mirror_config_file: scripts/imageset-config.yaml.example
+oc_mirror_workspace_dir: ./oc-mirror-workspace
+oc_mirror_registry_url: docker://registry.example.internal:8443

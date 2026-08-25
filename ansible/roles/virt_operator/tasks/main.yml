@@ -1,0 +1,49 @@
+---
+- name: Confirm CatalogSource manifest exists
+  ansible.builtin.stat:
+    path: "{{ virt_manifest_dir }}/CatalogSource.yaml"
+  register: virt_catalog
+  tags:
+    - virt
+    - dry_run
+
+- name: Confirm Subscription manifest exists
+  ansible.builtin.stat:
+    path: "{{ virt_manifest_dir }}/Subscription-kubevirt-hyperconverged.yaml"
+  register: virt_sub
+  tags:
+    - virt
+    - dry_run
+
+- name: Confirm HyperConverged manifest exists
+  ansible.builtin.stat:
+    path: "{{ virt_manifest_dir }}/HyperConverged.yaml"
+  register: virt_hco
+  tags:
+    - virt
+    - dry_run
+
+- name: Confirm ImageDigestMirrorSet manifest exists
+  ansible.builtin.stat:
+    path: "{{ virt_manifest_dir }}/ImageDigestMirrorSet.yaml"
+  register: virt_idms
+  tags:
+    - virt
+    - dry_run
+
+- name: Fail when a required virt manifest is missing
+  ansible.builtin.fail:
+    msg: One or more examples/*.yaml virt manifests are missing
+  when: not (virt_catalog.stat.exists and virt_sub.stat.exists and virt_hco.stat.exists and virt_idms.stat.exists)
+  tags:
+    - virt
+    - dry_run
+
+- name: Show oc apply dry-run command (not executed against a cluster here)
+  ansible.builtin.debug:
+    msg: >-
+      oc apply --dry-run=server -f {{ virt_manifest_dir }}/ImageDigestMirrorSet.yaml
+      and CatalogSource, Subscription, HyperConverged after kubeconfig exists.
+  tags:
+    - virt
+    - dry_run

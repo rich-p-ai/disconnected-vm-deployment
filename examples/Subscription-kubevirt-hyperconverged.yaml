@@ -1,0 +1,29 @@
+# Placeholder Subscription. source must be the disconnected CatalogSource, not redhat-operators.
+# Fact: package kubevirt-hyperconverged, channel stable, namespace openshift-cnv
+# https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/virtualization/installing
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-cnv
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: kubevirt-hyperconverged-group
+  namespace: openshift-cnv
+spec:
+  targetNamespaces:
+    - openshift-cnv
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: hco-operatorhub
+  namespace: openshift-cnv
+spec:
+  channel: stable
+  installPlanApproval: Manual
+  name: kubevirt-hyperconverged
+  source: redhat-operators-disconnected
+  sourceNamespace: openshift-marketplace
