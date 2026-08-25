@@ -148,7 +148,12 @@ spec:
 EOF
 
   VOLUME_YAML+="        - name: ${ROLE}\n          persistentVolumeClaim:\n            claimName: ${TARGET_DV}\n"
-  DISK_YAML+="            - name: ${ROLE}\n              disk:\n                bus: virtio\n"
+
+  if [[ "${ROLE}" == "boot" ]]; then
+    DISK_YAML+="            - name: ${ROLE}\n              disk:\n                bus: virtio\n              bootOrder: 1\n"
+  else
+    DISK_YAML+="            - name: ${ROLE}\n              disk:\n                bus: virtio\n"
+  fi
 done < "${BUNDLE}/disks.tsv"
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
