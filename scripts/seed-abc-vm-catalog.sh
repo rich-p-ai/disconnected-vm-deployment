@@ -27,6 +27,16 @@ require_commands() {
   done
 }
 
+# Catalog object name suffix: boot stays "boot"; other disks use sanitized volume name
+catalog_suffix() {
+  local role="$1" volume_name="$2"
+  if [[ "${role}" == "boot" ]]; then
+    echo "boot"
+  else
+    echo "${volume_name}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//'
+  fi
+}
+
 BUNDLE=""
 STORAGE_CLASS=""
 CATALOG_NAMESPACE_OVERRIDE=""
@@ -84,7 +94,8 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
 
   IMAGE_PATH="${BUNDLE}/${FILE_NAME}"
-  DV_NAME="${RELEASE_ID}-${ROLE}"
+  SUFFIX="$(catalog_suffix "${ROLE}" "${VOLUME_NAME}")"
+  DV_NAME="${RELEASE_ID}-${SUFFIX}"
 
   [[ -f "${IMAGE_PATH}" ]] || {
     echo "ERROR: Missing image file ${IMAGE_PATH}" >&2
