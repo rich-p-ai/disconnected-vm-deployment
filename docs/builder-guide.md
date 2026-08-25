@@ -119,7 +119,7 @@ The build script automatically copies the seed and deploy scripts into every gen
 
 - The source VM is stopped for an offline-consistent export.
 - Disks are downloaded with `--format=raw` (required to avoid gzip corruption).
-- The first PVC-backed disk is marked `boot` in `disks.tsv`. Edit the file if that is incorrect before transferring the bundle.
+- Boot disk selection prefers a volume whose name contains `root`, `boot`, `os`, or `system` (case-insensitive). Otherwise the first PVC is used. **Always review and edit `disks.tsv` if needed before transfer.**
 - `disks.tsv` records PVC size and volumeMode (Block / Filesystem).
 - SHA-256 checksums are written for every `.raw` file.
 - Use `--keep-export` only for troubleshooting.
@@ -153,6 +153,7 @@ column -t -s $'\t' disks.tsv 2>/dev/null || cat disks.tsv
 Example `disks.tsv`:
 
 ```text
+# role<TAB>volume_name<TAB>file<TAB>pvc_size<TAB>volume_mode
 boot    rootdisk     rootdisk.raw     120Gi   Block
 data    datadisk     datadisk.raw     500Gi   Block
 ```
@@ -181,6 +182,7 @@ The seed script:
 - Uploads each disk as a DataVolume (preserving volumeMode).
 - Labels the resulting PVCs.
 - Creates a **DataSource** named after the release (e.g. `abc-vm-1-0-0`) that points at the boot PVC. This is the primary catalog object.
+- Waits until the DataSource is Ready.
 
 Verify:
 
@@ -198,25 +200,37 @@ PersistentVolumeClaim/abc-vm-1-0-0-data   Bound
 DataSource/abc-vm-1-0-0          Ready=True
 ```
 
-The seed script waits until the DataSource is Ready. Do not publish the release if Ready is False.
-
-This package names catalog disks by role (`<release>-boot`, `<release>-data`). Use one boot disk and at most one `data` disk, or give extra disks distinct roles. Two lines with role `data` collide on the same catalog object name.
+This package names catalog disks by role (`<release>-boot`, `<release>-data`). Use one boot disk and at most one disk with role `data`, or give extra disks distinct roles (for example `data2`). Two lines with the same role collide on the same catalog object name.
 
 Do not delete or modify the catalog objects while users depend on this release.
 
 ---
 
-## 8. Catalog permissions
+## 8. Catalog permissions (required before user deploy)
 
-Users (or their service accounts) need permission to:
+Cross-namespace clone is denied by default. A cluster administrator must grant permissions **before** end users run the deploy script.
 
-- Create DataVolumes and VirtualMachines in their own namespace.
-- Get the catalog DataSource in `vm-catalog`.
-- Clone from the catalog DataSource and from the catalog PVCs in `vm-catalog`.
+A ready-to-adapt sample is in the repository:
 
-Cross-namespace clone access is not granted by default. A cluster administrator must create the appropriate RBAC (typically a ClusterRole on `datavolumes/source` plus RoleBindings).
+[`manifests/rbac-catalog-clone.yaml`](../manifests/rbac-catalog-clone.yaml)
 
-Validate before handing the procedure to users:
+### Quick apply (customize subjects first)
+
+1. Edit the sample and set the real User / Group / ServiceAccount names.
+2. Confirm the catalog namespace is `vm-catalog` (or change the Role namespace).
+3. Apply:
+
+```bash
+oc apply -f manifests/rbac-catalog-clone.yaml
+```
+
+### What the sample grants
+
+- ClusterRole `abc-vm-catalog-cloner` on `datavolumes/source` (required by CDI for cross-namespace clone).
+- Role `abc-vm-catalog-reader` in `vm-catalog` for get/list/watch on DataSources, DataVolumes, and PVCs.
+- Example RoleBindings (edit subjects before use).
+
+### Validate
 
 ```bash
 oc auth can-i create datavolumes.cdi.kubevirt.io -n user-project
@@ -225,7 +239,7 @@ oc auth can-i get datasources.cdi.kubevirt.io -n vm-catalog
 oc auth can-i get persistentvolumeclaims -n vm-catalog
 ```
 
-Also perform a real test clone into a non-production project. Keep the catalog namespace protected.
+Then perform a real test deploy into a non-production project. Keep the catalog namespace protected from user modification.
 
 ---
 
@@ -233,10 +247,11 @@ Also perform a real test clone into a non-production project. Keep the catalog n
 
 - `sha256sum -c checksums.sha256` succeeds.
 - Every exported disk is non-empty.
-- `disks.tsv` has the correct boot disk and all data disks.
+- `disks.tsv` has the correct boot disk and all data disks (roles are unique).
 - Source guest was shut down cleanly.
 - Bundle transferred via approved offline process.
 - Seed succeeds; every catalog DataVolume reaches `Succeeded` and the DataSource is Ready=True.
+- Catalog RBAC is applied and validated.
 - Test deploy produces a working VM that boots, sees all disks, and runs the application.
 - Network, DNS, certificates, licensing, backups, and monitoring are validated.
 - Record the tested OpenShift Virtualization version, storage class, and appliance version.
@@ -261,7 +276,7 @@ oc describe dv <name> -n vm-catalog
 ```
 
 **Clone fails**  
-Almost always RBAC or storage-class incompatibility. Inspect the target DataVolume events. The boot disk must clone with `spec.sourceRef` (`kind: DataSource`). A `spec.source.dataSource` field is not valid on a DataVolume.
+Almost always RBAC or storage-class incompatibility. Inspect the target DataVolume events. The boot disk must clone with `spec.sourceRef` (`kind: DataSource`). Ensure `manifests/rbac-catalog-clone.yaml` (or equivalent) is applied.
 
 **VM does not boot**  
 - Confirm the disk marked `boot` is correct.
@@ -284,3 +299,12 @@ abc-vm-2.0.0
 Never overwrite an existing catalog release. Create a new version, validate it, then publish it.
 
 Retain the golden catalog PVCs and DataSource for as long as end users need that version.
+
+---
+
+## 12. Known limitations (set expectations)
+
+- Only PVC-backed disks are exported.
+- The created VirtualMachine is minimal: CPU cores, memory, virtio disks, default pod network. Firmware, CPU model, Multus networks, cloud-init, secrets, and other domain settings from the source are not preserved.
+- Export is offline / crash-consistent at the disk level; ensure a clean guest shutdown for application consistency.
+- Secondary networks, static IPs, and advanced networking require a platform-approved overlay.
