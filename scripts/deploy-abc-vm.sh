@@ -102,6 +102,13 @@ if ! oc get datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >/dev/null 2>&1
   exit 1
 fi
 
+echo "Waiting for catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} to become Ready..."
+if ! oc wait datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" --for=condition=Ready --timeout=15m; then
+  oc describe datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >&2 || true
+  echo "ERROR: Catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} is not Ready." >&2
+  exit 1
+fi
+
 echo "Target context: $(oc config current-context)"
 echo "Target namespace: ${TARGET_NAMESPACE}"
 echo "VM name: ${VM_NAME}"
@@ -136,10 +143,10 @@ metadata:
     abcvm.io/role: ${ROLE}
     abcvm.io/vm: ${VM_NAME}
 spec:
-  source:
-    dataSource:
-      name: ${RELEASE_ID}
-      namespace: ${CATALOG_NAMESPACE}
+  sourceRef:
+    kind: DataSource
+    name: ${RELEASE_ID}
+    namespace: ${CATALOG_NAMESPACE}
   storage:
     storageClassName: ${STORAGE_CLASS}
     accessModes:

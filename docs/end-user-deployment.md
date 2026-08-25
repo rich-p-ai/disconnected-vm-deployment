@@ -11,7 +11,7 @@ The deployment script uses only:
 - standard Linux shell utilities
 - OpenShift Virtualization and CDI already present on the cluster
 
-> The script clones from the in-cluster catalog (DataSource for the boot disk, catalog PVCs for any data disks). It does not download images from any external system.
+> The script clones from the in-cluster catalog: boot disk via DataSource (`spec.sourceRef`), data disks via catalog PVCs (`spec.source.pvc`). It does not download images from any external system.
 
 ---
 
@@ -63,17 +63,19 @@ oc whoami
 oc get namespace user-project
 oc get storageclass ocs-storagecluster-ceph-rbd
 
-# Confirm the catalog DataSource and golden disks exist
+# Confirm the catalog DataSource is Ready and golden disks exist
 oc get datasource,dv,pvc -n vm-catalog
 ```
 
 For version `1.0.0` you should see objects similar to:
 
 ```text
-DataSource/abc-vm-1-0-0
+DataSource/abc-vm-1-0-0            Ready=True
 DataVolume/abc-vm-1-0-0-boot
 DataVolume/abc-vm-1-0-0-data
 ```
+
+Do not deploy until the DataSource shows Ready. The deploy script also waits for Ready before it clones.
 
 The exact names are derived from the release and are listed in the bundle’s `disks.tsv` and `release.env`.
 
@@ -187,7 +189,7 @@ oc describe dv abc-vm-01-boot -n user-project
 oc get events -n user-project --sort-by=.lastTimestamp
 ```
 
-Typical causes: missing cross-namespace RBAC, storage class does not support the volume mode / access mode, insufficient capacity, or catalog object missing.
+Typical causes: DataSource not Ready, missing cross-namespace RBAC, storage class does not support the volume mode / access mode, insufficient capacity, or catalog object missing.
 
 **Permission denied**  
 Your identity lacks create or clone rights. Contact the platform administrator.

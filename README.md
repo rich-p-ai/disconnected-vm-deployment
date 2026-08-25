@@ -21,10 +21,10 @@ The workflow is designed for strict air-gap environments:
    Move the complete bundle to a bastion that can reach the disconnected cluster using your approved offline process (USB, sneaker-net, approved media, etc.).
 
 3. **Seed** (destination cluster)  
-   Upload the disks as DataVolumes into a protected `vm-catalog` namespace and create a versioned **DataSource** that points at the boot disk. The DataSource becomes the primary catalog object.
+   Upload the disks as DataVolumes into a protected `vm-catalog` namespace and create a versioned **DataSource** that points at the boot disk. The DataSource is Ready before the catalog is used.
 
 4. **Deploy** (end-user namespace)  
-   Clone a writable boot disk from the catalog DataSource and any data disks from the corresponding catalog PVCs, then create a VirtualMachine. The new disks are independent of the golden images.
+   Clone a writable boot disk from the catalog DataSource (`spec.sourceRef`) and any data disks from the corresponding catalog PVCs (`spec.source.pvc`), then create a VirtualMachine. The new disks are independent of the golden images.
 
 ```text
 Source cluster                    Offline transfer                 Disconnected cluster

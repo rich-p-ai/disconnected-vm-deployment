@@ -151,6 +151,13 @@ spec:
       namespace: ${CATALOG_NAMESPACE}
 EOF
 
+echo "Waiting for DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} to become Ready..."
+if ! oc wait datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" --for=condition=Ready --timeout=15m; then
+  oc describe datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >&2 || true
+  echo "ERROR: DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} is not Ready." >&2
+  exit 1
+fi
+
 echo
 echo "Catalog seed completed successfully."
 echo "Primary catalog object: DataSource/${RELEASE_ID}"

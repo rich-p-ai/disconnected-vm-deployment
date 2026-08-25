@@ -35,7 +35,7 @@ Roles of the three scripts:
 
 1. **Build** – Export a stopped source VM and its disks to the bastion.
 2. **Seed** – Upload the disks as DataVolumes into a protected catalog namespace and create a versioned **DataSource** (the primary catalog object).
-3. **Deploy** – Clone a writable boot disk from the DataSource (and data disks from catalog PVCs) and create a VirtualMachine in an end-user namespace.
+3. **Deploy** – Clone a writable boot disk from the DataSource using `spec.sourceRef` (and data disks from catalog PVCs using `spec.source.pvc`) and create a VirtualMachine in an end-user namespace.
 
 After the bundle is transferred, the destination cluster needs no connectivity to the source cluster or the Internet.
 
@@ -195,8 +195,12 @@ DataVolume/abc-vm-1-0-0-boot   Succeeded
 DataVolume/abc-vm-1-0-0-data   Succeeded
 PersistentVolumeClaim/abc-vm-1-0-0-boot   Bound
 PersistentVolumeClaim/abc-vm-1-0-0-data   Bound
-DataSource/abc-vm-1-0-0
+DataSource/abc-vm-1-0-0          Ready=True
 ```
+
+The seed script waits until the DataSource is Ready. Do not publish the release if Ready is False.
+
+This package names catalog disks by role (`<release>-boot`, `<release>-data`). Use one boot disk and at most one `data` disk, or give extra disks distinct roles. Two lines with role `data` collide on the same catalog object name.
 
 Do not delete or modify the catalog objects while users depend on this release.
 
@@ -207,6 +211,7 @@ Do not delete or modify the catalog objects while users depend on this release.
 Users (or their service accounts) need permission to:
 
 - Create DataVolumes and VirtualMachines in their own namespace.
+- Get the catalog DataSource in `vm-catalog`.
 - Clone from the catalog DataSource and from the catalog PVCs in `vm-catalog`.
 
 Cross-namespace clone access is not granted by default. A cluster administrator must create the appropriate RBAC (typically a ClusterRole on `datavolumes/source` plus RoleBindings).
@@ -216,6 +221,8 @@ Validate before handing the procedure to users:
 ```bash
 oc auth can-i create datavolumes.cdi.kubevirt.io -n user-project
 oc auth can-i create virtualmachines.kubevirt.io -n user-project
+oc auth can-i get datasources.cdi.kubevirt.io -n vm-catalog
+oc auth can-i get persistentvolumeclaims -n vm-catalog
 ```
 
 Also perform a real test clone into a non-production project. Keep the catalog namespace protected.
@@ -229,7 +236,7 @@ Also perform a real test clone into a non-production project. Keep the catalog n
 - `disks.tsv` has the correct boot disk and all data disks.
 - Source guest was shut down cleanly.
 - Bundle transferred via approved offline process.
-- Seed succeeds; every catalog DataVolume reaches `Succeeded` and the DataSource exists.
+- Seed succeeds; every catalog DataVolume reaches `Succeeded` and the DataSource is Ready=True.
 - Test deploy produces a working VM that boots, sees all disks, and runs the application.
 - Network, DNS, certificates, licensing, backups, and monitoring are validated.
 - Record the tested OpenShift Virtualization version, storage class, and appliance version.
@@ -254,7 +261,7 @@ oc describe dv <name> -n vm-catalog
 ```
 
 **Clone fails**  
-Almost always RBAC or storage-class incompatibility. Inspect the target DataVolume events.
+Almost always RBAC or storage-class incompatibility. Inspect the target DataVolume events. The boot disk must clone with `spec.sourceRef` (`kind: DataSource`). A `spec.source.dataSource` field is not valid on a DataVolume.
 
 **VM does not boot**  
 - Confirm the disk marked `boot` is correct.
