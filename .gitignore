@@ -1,0 +1,13 @@
+# Appliance disk images
+*.raw
+*.img
+*.qcow2
+
+# Secrets and cluster credentials
+*secret*
+*pull-secret*
+kubeconfig
+*.kubeconfig
+.env
+*.pem
+*.key
