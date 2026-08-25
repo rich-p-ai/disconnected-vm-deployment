@@ -133,6 +133,7 @@ done < "${BUNDLE}/disks.tsv"
 
 BOOT_DV_NAME="${RELEASE_ID}-boot"
 
+# DataSource is the primary catalog object users (and the deploy script) reference
 cat <<EOF | oc apply -f -
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataSource
@@ -142,6 +143,7 @@ metadata:
   labels:
     abcvm.io/app: ${APP_ID}
     abcvm.io/version: "${VERSION}"
+    abcvm.io/role: boot
 spec:
   source:
     pvc:
@@ -151,4 +153,5 @@ EOF
 
 echo
 echo "Catalog seed completed successfully."
+echo "Primary catalog object: DataSource/${RELEASE_ID}"
 oc get dv,pvc,datasource -n "${CATALOG_NAMESPACE}" -l "abcvm.io/app=${APP_ID}"
