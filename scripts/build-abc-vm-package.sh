@@ -17,9 +17,10 @@ Usage:
     [--insecure]
 
 Bundle directory and VirtualMachineExport names are <vm>-<version>.
-Example: --vm windows --version 1.0 -> windows-1.0
-
 Downloads use virtctl --port-forward so no export Route is required.
+
+Export volume names follow the PVC/DataVolume name (for example
+"windows"), not the VM spec volume name ("rootdisk").
 EOF
 }
 
@@ -37,7 +38,6 @@ k8s_name() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9.-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//'
 }
 
-# Collect volume name + backing PVC/DV name from a VirtualMachine.
 collect_source_disks() {
   local ns="$1" vm="$2" out="$3"
   : > "${out}"
@@ -52,23 +52,49 @@ collect_source_disks() {
       done > "${out}"
 }
 
-resolve_export_volume() {
+# VirtualMachineExport volume names are PVC/DV names, and Windows VMs also
+# export a TPM persistent-state volume (dir/tar.gz). Only raw/gzip volumes
+# are disk images we can seed with CDI.
+pick_export_volume() {
   local wanted="$1"
-  local names="$2"
-  local claim="$3"
+  local claim="$2"
+  local info_file="$3"
+  local name formats
 
-  if echo "${names}" | grep -Fxq "${wanted}"; then
-    echo "${wanted}"
-    return 0
+  if [[ -n "${claim}" ]]; then
+    while IFS=$'\t' read -r name formats; do
+      [[ -n "${name}" ]] || continue
+      if [[ "${name}" == "${claim}" ]] && echo " ${formats} " | grep -Eq ' raw | gzip '; then
+        echo "${name}"
+        return 0
+      fi
+    done < "${info_file}"
   fi
-  if [[ -n "${claim}" ]] && echo "${names}" | grep -Fxq "${claim}"; then
-    echo "${claim}"
-    return 0
+
+  if [[ -n "${wanted}" ]]; then
+    while IFS=$'\t' read -r name formats; do
+      [[ -n "${name}" ]] || continue
+      if [[ "${name}" == "${wanted}" ]] && echo " ${formats} " | grep -Eq ' raw | gzip '; then
+        echo "${name}"
+        return 0
+      fi
+    done < "${info_file}"
   fi
-  local count
-  count="$(echo "${names}" | grep -c . || true)"
-  if [[ "${count}" == "1" ]]; then
-    echo "${names}" | head -n1
+
+  local raw_count=0 raw_name=""
+  while IFS=$'\t' read -r name formats; do
+    [[ -n "${name}" ]] || continue
+    case "${name}" in
+      persistent-state*|*-persistent-state*) continue ;;
+    esac
+    if echo " ${formats} " | grep -Eq ' raw | gzip '; then
+      raw_count=$((raw_count + 1))
+      raw_name="${name}"
+    fi
+  done < "${info_file}"
+
+  if [[ "${raw_count}" -eq 1 ]]; then
+    echo "${raw_name}"
     return 0
   fi
   return 1
@@ -241,33 +267,34 @@ if ! oc wait virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
   exit 1
 fi
 
-EXPORT_VOLUME_NAMES="$(oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
-  -o jsonpath='{range .status.links.internal.volumes[*]}{.name}{"\n"}{end}')"
-if [[ -z "${EXPORT_VOLUME_NAMES}" ]]; then
-  EXPORT_VOLUME_NAMES="$(oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
-    -o jsonpath='{range .status.links.external.volumes[*]}{.name}{"\n"}{end}')"
+EXPORT_INFO="${BUNDLE}/export-volumes.tsv"
+oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
+  -o jsonpath='{range .status.links.internal.volumes[*]}{.name}{"\t"}{range .formats[*]}{.format}{" "}{end}{"\n"}{end}' \
+  > "${EXPORT_INFO}"
+if [[ ! -s "${EXPORT_INFO}" ]]; then
+  oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
+    -o jsonpath='{range .status.links.external.volumes[*]}{.name}{"\t"}{range .formats[*]}{.format}{" "}{end}{"\n"}{end}' \
+    > "${EXPORT_INFO}"
 fi
 
 echo "Export volumes:"
-echo "${EXPORT_VOLUME_NAMES}"
+cat "${EXPORT_INFO}"
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
 
   CLAIM_NAME="$(awk -F '\t' -v vol="${VOLUME_NAME}" '$1==vol {print $2; exit}' "${BUNDLE}/source-disks.tsv")"
-  DOWNLOAD_VOLUME="$(resolve_export_volume "${VOLUME_NAME}" "${EXPORT_VOLUME_NAMES}" "${CLAIM_NAME}" || true)"
+  DOWNLOAD_VOLUME="$(pick_export_volume "${VOLUME_NAME}" "${CLAIM_NAME}" "${EXPORT_INFO}" || true)"
   if [[ -z "${DOWNLOAD_VOLUME}" ]]; then
-    echo "ERROR: Could not map VM volume ${VOLUME_NAME} to an export volume." >&2
+    echo "ERROR: Could not map VM volume ${VOLUME_NAME} (PVC/DV ${CLAIM_NAME}) to a raw/gzip export volume." >&2
     echo "Available export volumes:" >&2
-    echo "${EXPORT_VOLUME_NAMES}" >&2
+    cat "${EXPORT_INFO}" >&2
     exit 1
   fi
 
   OUTPUT_FILE="${BUNDLE}/${FILE_NAME}"
-  echo "Downloading export volume ${DOWNLOAD_VOLUME} (VM volume ${VOLUME_NAME}) to ${OUTPUT_FILE}..."
+  echo "Downloading export volume ${DOWNLOAD_VOLUME} (VM volume ${VOLUME_NAME}, claim ${CLAIM_NAME}) to ${OUTPUT_FILE}..."
 
-  # Disconnected clusters usually have no virt-export Route. Port-forward
-  # uses the in-cluster export service through the API server.
   virtctl vmexport download "${EXPORT_NAME}" \
     --namespace="${NS}" \
     --volume="${DOWNLOAD_VOLUME}" \
