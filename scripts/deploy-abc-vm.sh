@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   deploy-abc-vm.sh \
-    --bundle <abc-vm-bundle-directory> \
+    --bundle <vm-bundle-directory> \
     --namespace <target-namespace> \
     --vm-name <new-vm-name> \
     --storage-class <target-storage-class> \
@@ -14,13 +14,9 @@ Usage:
     [--memory <quantity>] \
     [--start]
 
-Example:
-  deploy-abc-vm.sh \
-    --bundle /srv/abc-vm/releases/abc-vm-1.0.0 \
-    --namespace user-project \
-    --vm-name abc-vm-01 \
-    --storage-class ocs-storagecluster-ceph-rbd \
-    --start
+Clones the catalog DataSource into the target namespace and creates the VM.
+If source-vm.yaml contains EFI firmware, the new VM gets UEFI + TPM so a
+Windows guest can boot.
 EOF
 }
 
@@ -34,7 +30,6 @@ require_commands() {
   done
 }
 
-# Catalog / target object name suffix: boot stays "boot"; other disks use sanitized volume name
 disk_suffix() {
   local role="$1" volume_name="$2"
   if [[ "${role}" == "boot" ]]; then
@@ -78,7 +73,6 @@ require_commands
 [[ -f "${BUNDLE}/release.env" ]] || { echo "ERROR: Missing release.env" >&2; exit 1; }
 [[ -f "${BUNDLE}/disks.tsv" ]] || { echo "ERROR: Missing disks.tsv" >&2; exit 1; }
 
-# release.env is produced by the trusted build script. Do not source untrusted bundles.
 source "${BUNDLE}/release.env"
 
 CATALOG_NAMESPACE="${CATALOG_NAMESPACE_OVERRIDE:-${CATALOG_NAMESPACE:-vm-catalog}}"
@@ -96,17 +90,6 @@ if oc get vm "${VM_NAME}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! oc api-resources --api-group=kubevirt.io -o name 2>/dev/null | grep -Eq '^virtualmachines(\.|$)' && ! oc get vm --all-namespaces >/dev/null 2>&1; then
-  echo "ERROR: OpenShift Virtualization VirtualMachine API is unavailable." >&2
-  exit 1
-fi
-
-if ! oc api-resources --api-group=cdi.kubevirt.io -o name 2>/dev/null | grep -Eq '^datavolumes(\.|$)' && ! oc get dv --all-namespaces >/dev/null 2>&1; then
-  echo "ERROR: CDI DataVolume API is unavailable." >&2
-  exit 1
-fi
-
-# Prefer DataSource for the boot image (standard CDI catalog pattern)
 if ! oc get datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >/dev/null 2>&1; then
   echo "ERROR: Catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} not found. Run seed first." >&2
   exit 1
@@ -117,6 +100,16 @@ if ! oc wait datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" --for=conditio
   oc describe datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >&2 || true
   echo "ERROR: Catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} is not Ready." >&2
   exit 1
+fi
+
+FIRMWARE_YAML=""
+TPM_YAML=""
+DISK_BUS="virtio"
+if [[ -f "${BUNDLE}/source-vm.yaml" ]] && grep -Eq 'efi:|bootloader:' "${BUNDLE}/source-vm.yaml"; then
+  echo "Source VM uses UEFI; enabling EFI firmware and TPM on the target VM."
+  FIRMWARE_YAML=$'        firmware:\n          bootloader:\n            efi: {}\n'
+  TPM_YAML=$'        tpm: {}\n'
+  DISK_BUS="sata"
 fi
 
 echo "Target context: $(oc config current-context)"
@@ -142,7 +135,6 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   fi
 
   if [[ "${ROLE}" == "boot" ]]; then
-    # Standard pattern: clone from catalog DataSource
     cat <<EOF | oc apply -f -
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
@@ -169,7 +161,6 @@ spec:
         storage: ${PVC_SIZE}
 EOF
   else
-    # Data disks: clone from the corresponding catalog PVC (named by volume)
     SOURCE_PVC="${RELEASE_ID}-${SUFFIX}"
     oc get pvc "${SOURCE_PVC}" -n "${CATALOG_NAMESPACE}" >/dev/null || {
       echo "ERROR: Source catalog PVC does not exist: ${CATALOG_NAMESPACE}/${SOURCE_PVC}" >&2
@@ -206,9 +197,9 @@ EOF
   VOLUME_YAML+="        - name: ${VOL_NAME}\n          persistentVolumeClaim:\n            claimName: ${TARGET_DV}\n"
 
   if [[ "${ROLE}" == "boot" ]]; then
-    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: virtio\n              bootOrder: 1\n"
+    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: ${DISK_BUS}\n              bootOrder: 1\n"
   else
-    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: virtio\n"
+    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: ${DISK_BUS}\n"
   fi
 done < "${BUNDLE}/disks.tsv"
 
@@ -247,7 +238,7 @@ spec:
         resources:
           requests:
             memory: ${MEMORY}
-        devices:
+$(printf '%b' "${FIRMWARE_YAML}")$(printf '%b' "${TPM_YAML}")        devices:
           disks:
 $(printf '%b' "${DISK_YAML}")          interfaces:
             - name: default
