@@ -9,10 +9,20 @@ Usage:
     --vm <source-vm-name> \
     --version <release-version> \
     --output-dir <bundle-parent-directory> \
-    [--keep-export]
+    [--keep-export] \
+    [--server <api-url>] \
+    [--token <token>] \
+    [--username <user>] \
+    [--password <password>] \
+    [--insecure]
+
+If virtctl is missing, the script installs it from the source cluster
+ConsoleCLIDownload (not the Internet).
 
 Example:
   build-abc-vm-package.sh \
+    --server https://api.source.example.com:6443 \
+    --token "$OC_TOKEN" \
     --namespace source-project \
     --vm source-vm \
     --version 1.0.0 \
@@ -20,9 +30,9 @@ Example:
 EOF
 }
 
-require_commands() {
+require_base_commands() {
   local command
-  for command in bash oc virtctl awk cut grep sed sha256sum find sort mkdir cp date; do
+  for command in bash oc awk cut grep sed sha256sum find sort mkdir cp date; do
     command -v "${command}" >/dev/null 2>&1 || {
       echo "ERROR: Required command is missing: ${command}" >&2
       exit 127
@@ -35,6 +45,11 @@ VM=""
 VERSION=""
 OUTPUT_DIR=""
 KEEP_EXPORT="false"
+OC_SERVER=""
+OC_TOKEN=""
+OC_USERNAME=""
+OC_PASSWORD=""
+OC_INSECURE="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,12 +58,17 @@ while [[ $# -gt 0 ]]; do
     --version) VERSION="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --keep-export) KEEP_EXPORT="true"; shift ;;
+    --server) OC_SERVER="$2"; shift 2 ;;
+    --token) OC_TOKEN="$2"; shift 2 ;;
+    --username) OC_USERNAME="$2"; shift 2 ;;
+    --password) OC_PASSWORD="$2"; shift 2 ;;
+    --insecure) OC_INSECURE="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
 done
 
-require_commands
+require_base_commands
 
 [[ -n "${NS}" && -n "${VM}" && -n "${VERSION}" && -n "${OUTPUT_DIR}" ]] || {
   usage
@@ -56,12 +76,19 @@ require_commands
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/oc-virtctl.sh
+source "${SCRIPT_DIR}/lib/oc-virtctl.sh"
+
+export OC_SERVER OC_TOKEN OC_USERNAME OC_PASSWORD OC_INSECURE
+oc_login_if_requested
+ensure_logged_in
+ensure_virtctl
+
 BUNDLE="${OUTPUT_DIR}/abc-vm-${VERSION}"
 EXPORT_NAME="abc-vm-export-${VERSION//[^a-zA-Z0-9-]/-}"
 
 mkdir -p "${BUNDLE}"
 
-oc whoami >/dev/null
 oc get vm "${VM}" -n "${NS}" >/dev/null
 
 if ! oc api-resources --api-group=kubevirt.io -o name | grep -qx 'virtualmachines'; then
@@ -204,8 +231,10 @@ done < "${BUNDLE}/disks.tsv"
   sha256sum *.raw > checksums.sha256
 )
 
+mkdir -p "${BUNDLE}/lib"
 cp "${SCRIPT_DIR}/seed-abc-vm-catalog.sh" "${BUNDLE}/"
 cp "${SCRIPT_DIR}/deploy-abc-vm.sh" "${BUNDLE}/"
+cp "${SCRIPT_DIR}/lib/oc-virtctl.sh" "${BUNDLE}/lib/"
 chmod 0750 "${BUNDLE}/seed-abc-vm-catalog.sh" "${BUNDLE}/deploy-abc-vm.sh"
 
 if [[ "${KEEP_EXPORT}" != "true" ]]; then
