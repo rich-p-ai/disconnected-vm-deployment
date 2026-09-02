@@ -16,17 +16,11 @@ Usage:
     [--password <password>] \
     [--insecure]
 
+Bundle directory and VirtualMachineExport names are <vm>-<version>.
+Example: --vm windows --version 1.0 -> windows-1.0
+
 If virtctl is missing, the script installs it from the source cluster
 ConsoleCLIDownload (not the Internet).
-
-Example:
-  build-abc-vm-package.sh \
-    --server https://api.source.example.com:6443 \
-    --token "$OC_TOKEN" \
-    --namespace source-project \
-    --vm source-vm \
-    --version 1.0.0 \
-    --output-dir /srv/abc-vm/releases
 EOF
 }
 
@@ -38,6 +32,10 @@ require_base_commands() {
       exit 127
     }
   done
+}
+
+k8s_name() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9.-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//'
 }
 
 # Collect volume name + backing PVC/DV name from a VirtualMachine.
@@ -107,8 +105,11 @@ else
   }
 fi
 
-BUNDLE="${OUTPUT_DIR}/abc-vm-${VERSION}"
-EXPORT_NAME="abc-vm-export-${VERSION//[^a-zA-Z0-9-]/-}"
+SAFE_VM="$(k8s_name "${VM}")"
+SAFE_VERSION="$(k8s_name "${VERSION}")"
+RELEASE_ID="${SAFE_VM}-${SAFE_VERSION}"
+BUNDLE="${OUTPUT_DIR}/${SAFE_VM}-${VERSION}"
+EXPORT_NAME="${RELEASE_ID}"
 
 mkdir -p "${BUNDLE}"
 
@@ -117,6 +118,7 @@ oc get vm "${VM}" -n "${NS}" >/dev/null
 echo "Source context: $(oc config current-context)"
 echo "Source VM: ${NS}/${VM}"
 echo "Bundle: ${BUNDLE}"
+echo "Export name: ${EXPORT_NAME}"
 
 if oc get vmi "${VM}" -n "${NS}" >/dev/null 2>&1; then
   echo "Stopping VM ${NS}/${VM}..."
@@ -185,8 +187,8 @@ while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
 done < "${BUNDLE}/source-disks.tsv"
 
 cat > "${BUNDLE}/release.env" <<EOF
-APP_NAME="ABC VM"
-APP_ID="abc-vm"
+APP_NAME="${VM}"
+APP_ID="${SAFE_VM}"
 VERSION="${VERSION}"
 SOURCE_NAMESPACE="${NS}"
 SOURCE_VM="${VM}"
@@ -201,28 +203,25 @@ if oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" >/dev/null 2>&1; then
   virtctl vmexport delete "${EXPORT_NAME}" -n "${NS}" || true
 fi
 
+# Also remove the old hardcoded name if a previous run left it behind.
+if oc get virtualmachineexport "abc-vm-export-${SAFE_VERSION}" -n "${NS}" >/dev/null 2>&1; then
+  virtctl vmexport delete "abc-vm-export-${SAFE_VERSION}" -n "${NS}" || true
+fi
+
 echo "Creating VM export ${EXPORT_NAME}..."
 virtctl vmexport create "${EXPORT_NAME}" \
   --vm="${VM}" \
   --namespace="${NS}" \
   --ttl=24h
 
-echo "Waiting for VM export readiness..."
-while true; do
-  PHASE="$(oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-
-  if [[ "${PHASE}" == "Ready" ]]; then
-    break
-  fi
-
-  if [[ "${PHASE}" == "Failed" ]]; then
-    oc describe virtualmachineexport "${EXPORT_NAME}" -n "${NS}" >&2 || true
-    exit 1
-  fi
-
-  echo "Current export phase: ${PHASE:-unknown}"
-  sleep 10
-done
+echo "Waiting for VM export ${EXPORT_NAME} to become Ready..."
+if ! oc wait virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
+    --for=jsonpath='{.status.phase}'=Ready \
+    --timeout=30m; then
+  oc describe virtualmachineexport "${EXPORT_NAME}" -n "${NS}" >&2 || true
+  echo "ERROR: VirtualMachineExport ${NS}/${EXPORT_NAME} did not become Ready." >&2
+  exit 1
+fi
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
@@ -235,7 +234,8 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     --volume="${VOLUME_NAME}" \
     --output="${OUTPUT_FILE}" \
     --format=raw \
-    --keep-vme
+    --keep-vme \
+    --readiness-timeout=30m
 
 done < "${BUNDLE}/disks.tsv"
 
@@ -260,7 +260,7 @@ if [[ "${KEEP_EXPORT}" != "true" ]]; then
 fi
 
 echo
-echo "ABC VM bundle created successfully: ${BUNDLE}"
-echo "Validate bundle contents with:"
+echo "Bundle created successfully: ${BUNDLE}"
+echo "Validate with:"
 echo "  cd ${BUNDLE} && sha256sum -c checksums.sha256"
 echo "Confirm the boot disk role in disks.tsv before transfer."
