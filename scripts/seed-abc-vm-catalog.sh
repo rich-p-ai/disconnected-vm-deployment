@@ -106,11 +106,7 @@ CATALOG_NAMESPACE="${CATALOG_NAMESPACE_OVERRIDE:-${CATALOG_NAMESPACE:-vm-catalog
 RELEASE_ID="${APP_ID}-${VERSION//[^a-zA-Z0-9-]/-}"
 
 oc get storageclass "${STORAGE_CLASS}" >/dev/null
-
-if ! oc api-resources --api-group=cdi.kubevirt.io -o name | grep -qx 'datavolumes'; then
-  echo "ERROR: CDI DataVolume API is unavailable." >&2
-  exit 1
-fi
+require_cdi_api
 
 echo "Destination context: $(oc config current-context)"
 echo "Catalog namespace: ${CATALOG_NAMESPACE}"
