@@ -13,10 +13,6 @@ Usage:
     [--username <user>] \
     [--password <password>] \
     [--insecure]
-
-Uploads raw disks from the bundle into catalog DataVolumes and creates
-a DataSource for the boot disk. Uses virtctl image-upload --insecure
-because disconnected clusters often have untrusted upload-proxy certs.
 EOF
 }
 
@@ -72,7 +68,21 @@ require_base_commands
 
 [[ -f "${BUNDLE}/release.env" ]] || { echo "ERROR: Missing release.env" >&2; exit 1; }
 [[ -f "${BUNDLE}/disks.tsv" ]] || { echo "ERROR: Missing disks.tsv" >&2; exit 1; }
-[[ -f "${BUNDLE}/checksums.sha256" ]] || { echo "ERROR: Missing checksums.sha256" >&2; exit 1; }
+
+if [[ ! -f "${BUNDLE}/checksums.sha256" ]]; then
+  echo "checksums.sha256 is missing; generating it from *.raw in the bundle..."
+  shopt -s nullglob
+  raw_files=("${BUNDLE}"/*.raw)
+  shopt -u nullglob
+  if [[ ${#raw_files[@]} -eq 0 ]]; then
+    echo "ERROR: No .raw disk images found in ${BUNDLE}" >&2
+    exit 1
+  fi
+  (
+    cd "${BUNDLE}"
+    sha256sum *.raw > checksums.sha256
+  )
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/lib/oc-virtctl.sh" ]]; then
