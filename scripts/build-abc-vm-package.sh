@@ -19,8 +19,7 @@ Usage:
 Bundle directory and VirtualMachineExport names are <vm>-<version>.
 Example: --vm windows --version 1.0 -> windows-1.0
 
-If virtctl is missing, the script installs it from the source cluster
-ConsoleCLIDownload (not the Internet).
+Downloads use virtctl --port-forward so no export Route is required.
 EOF
 }
 
@@ -39,7 +38,6 @@ k8s_name() {
 }
 
 # Collect volume name + backing PVC/DV name from a VirtualMachine.
-# Handles both persistentVolumeClaim and dataVolume sources.
 collect_source_disks() {
   local ns="$1" vm="$2" out="$3"
   : > "${out}"
@@ -52,6 +50,28 @@ collect_source_disks() {
         [[ -n "${claim}" ]] || continue
         printf '%s\t%s\n' "${vol_name}" "${claim}"
       done > "${out}"
+}
+
+resolve_export_volume() {
+  local wanted="$1"
+  local names="$2"
+  local claim="$3"
+
+  if echo "${names}" | grep -Fxq "${wanted}"; then
+    echo "${wanted}"
+    return 0
+  fi
+  if [[ -n "${claim}" ]] && echo "${names}" | grep -Fxq "${claim}"; then
+    echo "${claim}"
+    return 0
+  fi
+  local count
+  count="$(echo "${names}" | grep -c . || true)"
+  if [[ "${count}" == "1" ]]; then
+    echo "${names}" | head -n1
+    return 0
+  fi
+  return 1
 }
 
 NS=""
@@ -143,7 +163,6 @@ if [[ ! -s "${BUNDLE}/source-disks.tsv" ]]; then
   exit 1
 fi
 
-# Prefer a volume whose name suggests the OS disk; otherwise use the first PVC.
 BOOT_VOLUME=""
 FIRST_VOLUME=""
 while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
@@ -203,7 +222,6 @@ if oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" >/dev/null 2>&1; then
   virtctl vmexport delete "${EXPORT_NAME}" -n "${NS}" || true
 fi
 
-# Also remove the old hardcoded name if a previous run left it behind.
 if oc get virtualmachineexport "abc-vm-export-${SAFE_VERSION}" -n "${NS}" >/dev/null 2>&1; then
   virtctl vmexport delete "abc-vm-export-${SAFE_VERSION}" -n "${NS}" || true
 fi
@@ -223,18 +241,41 @@ if ! oc wait virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
   exit 1
 fi
 
+EXPORT_VOLUME_NAMES="$(oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
+  -o jsonpath='{range .status.links.internal.volumes[*]}{.name}{"\n"}{end}')"
+if [[ -z "${EXPORT_VOLUME_NAMES}" ]]; then
+  EXPORT_VOLUME_NAMES="$(oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
+    -o jsonpath='{range .status.links.external.volumes[*]}{.name}{"\n"}{end}')"
+fi
+
+echo "Export volumes:"
+echo "${EXPORT_VOLUME_NAMES}"
+
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
 
-  OUTPUT_FILE="${BUNDLE}/${FILE_NAME}"
-  echo "Downloading ${VOLUME_NAME} to ${OUTPUT_FILE}..."
+  CLAIM_NAME="$(awk -F '\t' -v vol="${VOLUME_NAME}" '$1==vol {print $2; exit}' "${BUNDLE}/source-disks.tsv")"
+  DOWNLOAD_VOLUME="$(resolve_export_volume "${VOLUME_NAME}" "${EXPORT_VOLUME_NAMES}" "${CLAIM_NAME}" || true)"
+  if [[ -z "${DOWNLOAD_VOLUME}" ]]; then
+    echo "ERROR: Could not map VM volume ${VOLUME_NAME} to an export volume." >&2
+    echo "Available export volumes:" >&2
+    echo "${EXPORT_VOLUME_NAMES}" >&2
+    exit 1
+  fi
 
+  OUTPUT_FILE="${BUNDLE}/${FILE_NAME}"
+  echo "Downloading export volume ${DOWNLOAD_VOLUME} (VM volume ${VOLUME_NAME}) to ${OUTPUT_FILE}..."
+
+  # Disconnected clusters usually have no virt-export Route. Port-forward
+  # uses the in-cluster export service through the API server.
   virtctl vmexport download "${EXPORT_NAME}" \
     --namespace="${NS}" \
-    --volume="${VOLUME_NAME}" \
+    --volume="${DOWNLOAD_VOLUME}" \
     --output="${OUTPUT_FILE}" \
     --format=raw \
     --keep-vme \
+    --insecure \
+    --port-forward \
     --readiness-timeout=30m
 
 done < "${BUNDLE}/disks.tsv"
