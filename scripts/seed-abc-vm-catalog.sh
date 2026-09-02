@@ -7,19 +7,29 @@ Usage:
   seed-abc-vm-catalog.sh \
     --bundle <abc-vm-bundle-directory> \
     --storage-class <destination-storage-class> \
-    [--catalog-namespace <namespace>]
+    [--catalog-namespace <namespace>] \
+    [--server <api-url>] \
+    [--token <token>] \
+    [--username <user>] \
+    [--password <password>] \
+    [--insecure]
+
+If virtctl is missing, the script installs it from the destination cluster
+ConsoleCLIDownload (not the Internet).
 
 Example:
   seed-abc-vm-catalog.sh \
+    --server https://api.dest.example.com:6443 \
+    --token "$OC_TOKEN" \
     --bundle /srv/abc-vm/releases/abc-vm-1.0.0 \
     --storage-class ocs-storagecluster-ceph-rbd \
     --catalog-namespace vm-catalog
 EOF
 }
 
-require_commands() {
+require_base_commands() {
   local command
-  for command in bash oc virtctl awk cut grep sed sha256sum mkdir; do
+  for command in bash oc awk cut grep sed sha256sum mkdir; do
     command -v "${command}" >/dev/null 2>&1 || {
       echo "ERROR: Required command is missing: ${command}" >&2
       exit 127
@@ -40,18 +50,28 @@ catalog_suffix() {
 BUNDLE=""
 STORAGE_CLASS=""
 CATALOG_NAMESPACE_OVERRIDE=""
+OC_SERVER=""
+OC_TOKEN=""
+OC_USERNAME=""
+OC_PASSWORD=""
+OC_INSECURE="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --bundle) BUNDLE="$2"; shift 2 ;;
     --storage-class) STORAGE_CLASS="$2"; shift 2 ;;
     --catalog-namespace) CATALOG_NAMESPACE_OVERRIDE="$2"; shift 2 ;;
+    --server) OC_SERVER="$2"; shift 2 ;;
+    --token) OC_TOKEN="$2"; shift 2 ;;
+    --username) OC_USERNAME="$2"; shift 2 ;;
+    --password) OC_PASSWORD="$2"; shift 2 ;;
+    --insecure) OC_INSECURE="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
 done
 
-require_commands
+require_base_commands
 
 [[ -n "${BUNDLE}" && -n "${STORAGE_CLASS}" ]] || {
   usage
@@ -62,13 +82,29 @@ require_commands
 [[ -f "${BUNDLE}/disks.tsv" ]] || { echo "ERROR: Missing disks.tsv" >&2; exit 1; }
 [[ -f "${BUNDLE}/checksums.sha256" ]] || { echo "ERROR: Missing checksums.sha256" >&2; exit 1; }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Prefer the helper next to this script (repo or copied bundle).
+# shellcheck source=lib/oc-virtctl.sh
+if [[ -f "${SCRIPT_DIR}/lib/oc-virtctl.sh" ]]; then
+  source "${SCRIPT_DIR}/lib/oc-virtctl.sh"
+elif [[ -f "${SCRIPT_DIR}/oc-virtctl.sh" ]]; then
+  source "${SCRIPT_DIR}/oc-virtctl.sh"
+else
+  echo "ERROR: Missing helper scripts/lib/oc-virtctl.sh" >&2
+  exit 1
+fi
+
+export OC_SERVER OC_TOKEN OC_USERNAME OC_PASSWORD OC_INSECURE
+oc_login_if_requested
+ensure_logged_in
+ensure_virtctl
+
 # release.env is produced by the trusted build script. Do not source untrusted bundles.
 source "${BUNDLE}/release.env"
 
 CATALOG_NAMESPACE="${CATALOG_NAMESPACE_OVERRIDE:-${CATALOG_NAMESPACE:-vm-catalog}}"
 RELEASE_ID="${APP_ID}-${VERSION//[^a-zA-Z0-9-]/-}"
 
-oc whoami >/dev/null
 oc get storageclass "${STORAGE_CLASS}" >/dev/null
 
 if ! oc api-resources --api-group=cdi.kubevirt.io -o name | grep -qx 'datavolumes'; then
