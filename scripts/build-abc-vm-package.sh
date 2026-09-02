@@ -40,6 +40,22 @@ require_base_commands() {
   done
 }
 
+# Collect volume name + backing PVC/DV name from a VirtualMachine.
+# Handles both persistentVolumeClaim and dataVolume sources.
+collect_source_disks() {
+  local ns="$1" vm="$2" out="$3"
+  : > "${out}"
+
+  oc get vm "${vm}" -n "${ns}" \
+    -o jsonpath='{range .spec.template.spec.volumes[*]}{.name}{"\t"}{.persistentVolumeClaim.claimName}{"\t"}{.dataVolume.name}{"\n"}{end}' \
+    | while IFS=$'\t' read -r vol_name pvc_name dv_name; do
+        [[ -n "${vol_name}" ]] || continue
+        local claim="${pvc_name:-${dv_name}}"
+        [[ -n "${claim}" ]] || continue
+        printf '%s\t%s\n' "${vol_name}" "${claim}"
+      done > "${out}"
+}
+
 NS=""
 VM=""
 VERSION=""
@@ -76,13 +92,20 @@ require_base_commands
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/oc-virtctl.sh
-source "${SCRIPT_DIR}/lib/oc-virtctl.sh"
-
-export OC_SERVER OC_TOKEN OC_USERNAME OC_PASSWORD OC_INSECURE
-oc_login_if_requested
-ensure_logged_in
-ensure_virtctl
+if [[ -f "${SCRIPT_DIR}/lib/oc-virtctl.sh" ]]; then
+  # shellcheck source=lib/oc-virtctl.sh
+  source "${SCRIPT_DIR}/lib/oc-virtctl.sh"
+  export OC_SERVER OC_TOKEN OC_USERNAME OC_PASSWORD OC_INSECURE
+  oc_login_if_requested
+  ensure_logged_in
+  ensure_virtctl
+else
+  oc whoami >/dev/null
+  command -v virtctl >/dev/null 2>&1 || {
+    echo "ERROR: virtctl is required and scripts/lib/oc-virtctl.sh is not present." >&2
+    exit 127
+  }
+fi
 
 BUNDLE="${OUTPUT_DIR}/abc-vm-${VERSION}"
 EXPORT_NAME="abc-vm-export-${VERSION//[^a-zA-Z0-9-]/-}"
@@ -90,8 +113,6 @@ EXPORT_NAME="abc-vm-export-${VERSION//[^a-zA-Z0-9-]/-}"
 mkdir -p "${BUNDLE}"
 
 oc get vm "${VM}" -n "${NS}" >/dev/null
-require_kubevirt_api
-require_cdi_api
 
 echo "Source context: $(oc config current-context)"
 echo "Source VM: ${NS}/${VM}"
@@ -111,14 +132,14 @@ echo "Saving source metadata..."
 oc get vm "${VM}" -n "${NS}" -o yaml > "${BUNDLE}/source-vm.yaml"
 oc get pvc -n "${NS}" -o yaml > "${BUNDLE}/source-pvcs.yaml"
 
-oc get vm "${VM}" -n "${NS}" \
-  -o jsonpath='{range .spec.template.spec.volumes[?(@.persistentVolumeClaim)]}{.name}{"\t"}{.persistentVolumeClaim.claimName}{"\n"}{end}' \
-  > "${BUNDLE}/source-disks.tsv"
+collect_source_disks "${NS}" "${VM}" "${BUNDLE}/source-disks.tsv"
 
-[[ -s "${BUNDLE}/source-disks.tsv" ]] || {
-  echo "ERROR: No PVC-backed VM disks were found." >&2
+if [[ ! -s "${BUNDLE}/source-disks.tsv" ]]; then
+  echo "ERROR: No PVC- or DataVolume-backed VM disks were found." >&2
+  echo "Inspect volumes with:" >&2
+  echo "  oc get vm ${VM} -n ${NS} -o yaml | sed -n '/volumes:/,/networks:/p'" >&2
   exit 1
-}
+fi
 
 # Prefer a volume whose name suggests the OS disk; otherwise use the first PVC.
 BOOT_VOLUME=""
@@ -223,11 +244,15 @@ done < "${BUNDLE}/disks.tsv"
   sha256sum *.raw > checksums.sha256
 )
 
-mkdir -p "${BUNDLE}/lib"
-cp "${SCRIPT_DIR}/seed-abc-vm-catalog.sh" "${BUNDLE}/"
-cp "${SCRIPT_DIR}/deploy-abc-vm.sh" "${BUNDLE}/"
-cp "${SCRIPT_DIR}/lib/oc-virtctl.sh" "${BUNDLE}/lib/"
-chmod 0750 "${BUNDLE}/seed-abc-vm-catalog.sh" "${BUNDLE}/deploy-abc-vm.sh"
+if [[ -f "${SCRIPT_DIR}/seed-abc-vm-catalog.sh" ]]; then
+  mkdir -p "${BUNDLE}/lib"
+  cp "${SCRIPT_DIR}/seed-abc-vm-catalog.sh" "${BUNDLE}/"
+  cp "${SCRIPT_DIR}/deploy-abc-vm.sh" "${BUNDLE}/" 2>/dev/null || true
+  if [[ -f "${SCRIPT_DIR}/lib/oc-virtctl.sh" ]]; then
+    cp "${SCRIPT_DIR}/lib/oc-virtctl.sh" "${BUNDLE}/lib/"
+  fi
+  chmod 0750 "${BUNDLE}/seed-abc-vm-catalog.sh" "${BUNDLE}/deploy-abc-vm.sh" 2>/dev/null || true
+fi
 
 if [[ "${KEEP_EXPORT}" != "true" ]]; then
   echo "Deleting temporary VM export ${EXPORT_NAME}..."
