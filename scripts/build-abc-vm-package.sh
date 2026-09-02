@@ -90,16 +90,8 @@ EXPORT_NAME="abc-vm-export-${VERSION//[^a-zA-Z0-9-]/-}"
 mkdir -p "${BUNDLE}"
 
 oc get vm "${VM}" -n "${NS}" >/dev/null
-
-if ! oc api-resources --api-group=kubevirt.io -o name | grep -qx 'virtualmachines'; then
-  echo "ERROR: OpenShift Virtualization VirtualMachine API is unavailable." >&2
-  exit 1
-fi
-
-if ! oc api-resources --api-group=cdi.kubevirt.io -o name | grep -qx 'datavolumes'; then
-  echo "ERROR: CDI DataVolume API is unavailable." >&2
-  exit 1
-fi
+require_kubevirt_api
+require_cdi_api
 
 echo "Source context: $(oc config current-context)"
 echo "Source VM: ${NS}/${VM}"
