@@ -96,12 +96,12 @@ if oc get vm "${VM_NAME}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! oc api-resources --api-group=kubevirt.io -o name | grep -qx 'virtualmachines'; then
+if ! oc api-resources --api-group=kubevirt.io -o name 2>/dev/null | grep -Eq '^virtualmachines(\.|$)' && ! oc get vm --all-namespaces >/dev/null 2>&1; then
   echo "ERROR: OpenShift Virtualization VirtualMachine API is unavailable." >&2
   exit 1
 fi
 
-if ! oc api-resources --api-group=cdi.kubevirt.io -o name | grep -qx 'datavolumes'; then
+if ! oc api-resources --api-group=cdi.kubevirt.io -o name 2>/dev/null | grep -Eq '^datavolumes(\.|$)' && ! oc get dv --all-namespaces >/dev/null 2>&1; then
   echo "ERROR: CDI DataVolume API is unavailable." >&2
   exit 1
 fi
