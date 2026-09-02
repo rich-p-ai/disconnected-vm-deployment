@@ -52,6 +52,34 @@ ensure_logged_in() {
   exit 1
 }
 
+# oc api-resources -o name prints fully qualified names such as
+# virtualmachines.kubevirt.io, not the short name "virtualmachines".
+require_api_resource() {
+  local api_group="$1"
+  local short_name="$2"
+  local pretty="$3"
+
+  if oc api-resources --api-group="${api_group}" -o name 2>/dev/null | grep -Eq "^${short_name}(\.|$)"; then
+    return 0
+  fi
+
+  if oc get "${short_name}" --all-namespaces >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "ERROR: ${pretty} API is unavailable." >&2
+  echo "Checked api-group ${api_group} for resource ${short_name}." >&2
+  exit 1
+}
+
+require_kubevirt_api() {
+  require_api_resource "kubevirt.io" "virtualmachines" "OpenShift Virtualization VirtualMachine"
+}
+
+require_cdi_api() {
+  require_api_resource "cdi.kubevirt.io" "datavolumes" "CDI DataVolume"
+}
+
 virtctl_arch_label() {
   local arch
   arch="$(uname -m)"
