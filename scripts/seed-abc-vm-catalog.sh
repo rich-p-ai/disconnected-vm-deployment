@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   seed-abc-vm-catalog.sh \
-    --bundle <abc-vm-bundle-directory> \
+    --bundle <vm-bundle-directory> \
     --storage-class <destination-storage-class> \
     [--catalog-namespace <namespace>] \
     [--server <api-url>] \
@@ -14,16 +14,9 @@ Usage:
     [--password <password>] \
     [--insecure]
 
-If virtctl is missing, the script installs it from the destination cluster
-ConsoleCLIDownload (not the Internet).
-
-Example:
-  seed-abc-vm-catalog.sh \
-    --server https://api.dest.example.com:6443 \
-    --token "$OC_TOKEN" \
-    --bundle /srv/abc-vm/releases/abc-vm-1.0.0 \
-    --storage-class ocs-storagecluster-ceph-rbd \
-    --catalog-namespace vm-catalog
+Uploads raw disks from the bundle into catalog DataVolumes and creates
+a DataSource for the boot disk. Uses virtctl image-upload --insecure
+because disconnected clusters often have untrusted upload-proxy certs.
 EOF
 }
 
@@ -37,7 +30,6 @@ require_base_commands() {
   done
 }
 
-# Catalog object name suffix: boot stays "boot"; other disks use sanitized volume name
 catalog_suffix() {
   local role="$1" volume_name="$2"
   if [[ "${role}" == "boot" ]]; then
@@ -83,9 +75,8 @@ require_base_commands
 [[ -f "${BUNDLE}/checksums.sha256" ]] || { echo "ERROR: Missing checksums.sha256" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Prefer the helper next to this script (repo or copied bundle).
-# shellcheck source=lib/oc-virtctl.sh
 if [[ -f "${SCRIPT_DIR}/lib/oc-virtctl.sh" ]]; then
+  # shellcheck source=lib/oc-virtctl.sh
   source "${SCRIPT_DIR}/lib/oc-virtctl.sh"
 elif [[ -f "${SCRIPT_DIR}/oc-virtctl.sh" ]]; then
   source "${SCRIPT_DIR}/oc-virtctl.sh"
@@ -99,14 +90,12 @@ oc_login_if_requested
 ensure_logged_in
 ensure_virtctl
 
-# release.env is produced by the trusted build script. Do not source untrusted bundles.
 source "${BUNDLE}/release.env"
 
 CATALOG_NAMESPACE="${CATALOG_NAMESPACE_OVERRIDE:-${CATALOG_NAMESPACE:-vm-catalog}}"
 RELEASE_ID="${APP_ID}-${VERSION//[^a-zA-Z0-9-]/-}"
 
 oc get storageclass "${STORAGE_CLASS}" >/dev/null
-require_cdi_api
 
 echo "Destination context: $(oc config current-context)"
 echo "Catalog namespace: ${CATALOG_NAMESPACE}"
@@ -147,7 +136,6 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     exit 1
   fi
 
-  # virtctl expects lowercase volume-mode values
   VOLUME_MODE_LOWER="$(echo "${VOLUME_MODE}" | tr '[:upper:]' '[:lower:]')"
 
   echo "Uploading ${FILE_NAME} as ${CATALOG_NAMESPACE}/${DV_NAME} (volumeMode=${VOLUME_MODE_LOWER})..."
@@ -158,6 +146,7 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     --volume-mode="${VOLUME_MODE_LOWER}" \
     --access-mode=ReadWriteOnce \
     --image-path="${IMAGE_PATH}" \
+    --insecure \
     --wait-secs=86400
 
   PHASE="$(oc get dv "${DV_NAME}" -n "${CATALOG_NAMESPACE}" -o jsonpath='{.status.phase}')"
@@ -176,7 +165,6 @@ done < "${BUNDLE}/disks.tsv"
 
 BOOT_DV_NAME="${RELEASE_ID}-boot"
 
-# DataSource is the primary catalog object users (and the deploy script) reference
 cat <<EOF | oc apply -f -
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataSource
