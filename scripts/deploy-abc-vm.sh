@@ -116,13 +116,13 @@ echo "VM name: ${VM_NAME}"
 echo "Catalog namespace: ${CATALOG_NAMESPACE}"
 echo "Using DataSource: ${RELEASE_ID}"
 
-DISK_LINES=""
-VOLUME_LINES=""
+DISK_FILE="$(mktemp)"
+VOLUME_FILE="$(mktemp)"
+trap 'rm -f "${DISK_FILE}" "${VOLUME_FILE}"' EXIT
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   ROLE="$(strip_cr "${ROLE}")"
   VOLUME_NAME="$(strip_cr "${VOLUME_NAME}")"
-  FILE_NAME="$(strip_cr "${FILE_NAME}")"
   PVC_SIZE="$(strip_cr "${PVC_SIZE}")"
   VOLUME_MODE="$(strip_cr "${VOLUME_MODE}")"
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
@@ -195,15 +195,25 @@ EOF
     echo "Reusing existing disk ${TARGET_NAMESPACE}/${TARGET_DV}"
   fi
 
-  VOLUME_LINES+="        - name: ${VOL_NAME}"$'\n'
-  VOLUME_LINES+="          persistentVolumeClaim:"$'\n'
-  VOLUME_LINES+="            claimName: ${TARGET_DV}"'\n'
+  cat >> "${VOLUME_FILE}" <<EOF
+        - name: ${VOL_NAME}
+          persistentVolumeClaim:
+            claimName: ${TARGET_DV}
+EOF
 
-  DISK_LINES+="            - name: ${VOL_NAME}"'\n'
-  DISK_LINES+="              disk:"$'\n'
-  DISK_LINES+="                bus: ${DISK_BUS}"'\n'
   if [[ "${ROLE}" == "boot" ]]; then
-    DISK_LINES+="              bootOrder: 1"$'\n'
+    cat >> "${DISK_FILE}" <<EOF
+            - name: ${VOL_NAME}
+              disk:
+                bus: ${DISK_BUS}
+              bootOrder: 1
+EOF
+  else
+    cat >> "${DISK_FILE}" <<EOF
+            - name: ${VOL_NAME}
+              disk:
+                bus: ${DISK_BUS}
+EOF
   fi
 done < "${BUNDLE}/disks.tsv"
 
@@ -255,11 +265,11 @@ EOF
         tpm: {}
 EOF
   fi
-  cat <<EOF
+  cat <<'EOF'
         devices:
           disks:
 EOF
-  printf '%s' "${DISK_LINES}"
+  cat "${DISK_FILE}"
   cat <<'EOF'
           interfaces:
             - name: default
@@ -269,10 +279,11 @@ EOF
           pod: {}
       volumes:
 EOF
-  printf '%s' "${VOLUME_LINES}"
+  cat "${VOLUME_FILE}"
 } > "${VM_FILE}"
 
 echo "Applying VM manifest ${VM_FILE}"
+cat "${VM_FILE}"
 oc apply -f "${VM_FILE}"
 
 if [[ "${START_VM}" == "true" ]]; then
