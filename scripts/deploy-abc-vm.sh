@@ -105,7 +105,7 @@ fi
 USE_UEFI="false"
 DISK_BUS="virtio"
 if [[ -f "${BUNDLE}/source-vm.yaml" ]] && grep -Eq 'efi:|bootloader:' "${BUNDLE}/source-vm.yaml"; then
-  echo "Source VM uses UEFI; enabling EFI firmware and TPM on the target VM."
+  echo "Source VM uses UEFI; enabling EFI Secure Boot, SMM, and TPM on the target VM."
   USE_UEFI="true"
   DISK_BUS="sata"
 fi
@@ -261,7 +261,11 @@ EOF
     cat <<'EOF'
         firmware:
           bootloader:
-            efi: {}
+            efi:
+              secureBoot: true
+        features:
+          smm:
+            enabled: true
         tpm: {}
 EOF
   fi
