@@ -13,10 +13,6 @@ Usage:
     [--cpu-cores <count>] \
     [--memory <quantity>] \
     [--start]
-
-Clones the catalog DataSource into the target namespace and creates the VM.
-If source-vm.yaml contains EFI firmware, the new VM gets UEFI + TPM so a
-Windows guest can boot.
 EOF
 }
 
@@ -28,6 +24,10 @@ require_commands() {
       exit 127
     }
   done
+}
+
+strip_cr() {
+  printf '%s' "$1" | tr -d '\r'
 }
 
 disk_suffix() {
@@ -102,13 +102,11 @@ if ! oc wait datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" --for=conditio
   exit 1
 fi
 
-FIRMWARE_YAML=""
-TPM_YAML=""
+USE_UEFI="false"
 DISK_BUS="virtio"
 if [[ -f "${BUNDLE}/source-vm.yaml" ]] && grep -Eq 'efi:|bootloader:' "${BUNDLE}/source-vm.yaml"; then
   echo "Source VM uses UEFI; enabling EFI firmware and TPM on the target VM."
-  FIRMWARE_YAML=$'        firmware:\n          bootloader:\n            efi: {}\n'
-  TPM_YAML=$'        tpm: {}\n'
+  USE_UEFI="true"
   DISK_BUS="sata"
 fi
 
@@ -118,34 +116,35 @@ echo "VM name: ${VM_NAME}"
 echo "Catalog namespace: ${CATALOG_NAMESPACE}"
 echo "Using DataSource: ${RELEASE_ID}"
 
-VOLUME_YAML=""
-DISK_YAML=""
+DISK_LINES=""
+VOLUME_LINES=""
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
+  ROLE="$(strip_cr "${ROLE}")"
+  VOLUME_NAME="$(strip_cr "${VOLUME_NAME}")"
+  FILE_NAME="$(strip_cr "${FILE_NAME}")"
+  PVC_SIZE="$(strip_cr "${PVC_SIZE}")"
+  VOLUME_MODE="$(strip_cr "${VOLUME_MODE}")"
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
 
   SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
   TARGET_DV="${VM_NAME}-${SUFFIX}"
   VOL_NAME="${SUFFIX}"
 
-  if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
-     oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
-    echo "ERROR: Target disk already exists: ${TARGET_NAMESPACE}/${TARGET_DV}" >&2
-    exit 1
-  fi
-
-  if [[ "${ROLE}" == "boot" ]]; then
-    cat <<EOF | oc apply -f -
+  if ! oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 && \
+     ! oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
+    if [[ "${ROLE}" == "boot" ]]; then
+      cat <<EOF | oc apply -f -
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: ${TARGET_DV}
   namespace: ${TARGET_NAMESPACE}
   labels:
-    abcvm.io/app: ${APP_ID}
+    abcvm.io/app: "${APP_ID}"
     abcvm.io/version: "${VERSION}"
-    abcvm.io/role: ${ROLE}
-    abcvm.io/vm: ${VM_NAME}
+    abcvm.io/role: "${ROLE}"
+    abcvm.io/vm: "${VM_NAME}"
 spec:
   sourceRef:
     kind: DataSource
@@ -160,24 +159,23 @@ spec:
       requests:
         storage: ${PVC_SIZE}
 EOF
-  else
-    SOURCE_PVC="${RELEASE_ID}-${SUFFIX}"
-    oc get pvc "${SOURCE_PVC}" -n "${CATALOG_NAMESPACE}" >/dev/null || {
-      echo "ERROR: Source catalog PVC does not exist: ${CATALOG_NAMESPACE}/${SOURCE_PVC}" >&2
-      exit 1
-    }
-
-    cat <<EOF | oc apply -f -
+    else
+      SOURCE_PVC="${RELEASE_ID}-${SUFFIX}"
+      oc get pvc "${SOURCE_PVC}" -n "${CATALOG_NAMESPACE}" >/dev/null || {
+        echo "ERROR: Source catalog PVC does not exist: ${CATALOG_NAMESPACE}/${SOURCE_PVC}" >&2
+        exit 1
+      }
+      cat <<EOF | oc apply -f -
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: ${TARGET_DV}
   namespace: ${TARGET_NAMESPACE}
   labels:
-    abcvm.io/app: ${APP_ID}
+    abcvm.io/app: "${APP_ID}"
     abcvm.io/version: "${VERSION}"
-    abcvm.io/role: ${ROLE}
-    abcvm.io/vm: ${VM_NAME}
+    abcvm.io/role: "${ROLE}"
+    abcvm.io/vm: "${VM_NAME}"
 spec:
   source:
     pvc:
@@ -192,18 +190,26 @@ spec:
       requests:
         storage: ${PVC_SIZE}
 EOF
+    fi
+  else
+    echo "Reusing existing disk ${TARGET_NAMESPACE}/${TARGET_DV}"
   fi
 
-  VOLUME_YAML+="        - name: ${VOL_NAME}\n          persistentVolumeClaim:\n            claimName: ${TARGET_DV}\n"
+  VOLUME_LINES+="        - name: ${VOL_NAME}"$'\n'
+  VOLUME_LINES+="          persistentVolumeClaim:"$'\n'
+  VOLUME_LINES+="            claimName: ${TARGET_DV}"'\n'
 
+  DISK_LINES+="            - name: ${VOL_NAME}"'\n'
+  DISK_LINES+="              disk:"$'\n'
+  DISK_LINES+="                bus: ${DISK_BUS}"'\n'
   if [[ "${ROLE}" == "boot" ]]; then
-    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: ${DISK_BUS}\n              bootOrder: 1\n"
-  else
-    DISK_YAML+="            - name: ${VOL_NAME}\n              disk:\n                bus: ${DISK_BUS}\n"
+    DISK_LINES+="              bootOrder: 1"$'\n'
   fi
 done < "${BUNDLE}/disks.tsv"
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
+  ROLE="$(strip_cr "${ROLE}")"
+  VOLUME_NAME="$(strip_cr "${VOLUME_NAME}")"
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
   SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
   TARGET_DV="${VM_NAME}-${SUFFIX}"
@@ -214,14 +220,16 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     --timeout=4h
 done < "${BUNDLE}/disks.tsv"
 
-cat <<EOF | oc apply -f -
+VM_FILE="${BUNDLE}/generated-${VM_NAME}-vm.yaml"
+{
+  cat <<EOF
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: ${VM_NAME}
   namespace: ${TARGET_NAMESPACE}
   labels:
-    abcvm.io/app: ${APP_ID}
+    abcvm.io/app: "${APP_ID}"
     abcvm.io/version: "${VERSION}"
 spec:
   running: false
@@ -229,7 +237,7 @@ spec:
     metadata:
       labels:
         kubevirt.io/domain: ${VM_NAME}
-        abcvm.io/app: ${APP_ID}
+        abcvm.io/app: "${APP_ID}"
         abcvm.io/version: "${VERSION}"
     spec:
       domain:
@@ -237,18 +245,35 @@ spec:
           cores: ${CPU_CORES}
         resources:
           requests:
-            memory: ${MEMORY}
-$(printf '%b' "${FIRMWARE_YAML}")$(printf '%b' "${TPM_YAML}")        devices:
+            memory: "${MEMORY}"
+EOF
+  if [[ "${USE_UEFI}" == "true" ]]; then
+    cat <<'EOF'
+        firmware:
+          bootloader:
+            efi: {}
+        tpm: {}
+EOF
+  fi
+  cat <<EOF
+        devices:
           disks:
-$(printf '%b' "${DISK_YAML}")          interfaces:
+EOF
+  printf '%s' "${DISK_LINES}"
+  cat <<'EOF'
+          interfaces:
             - name: default
               masquerade: {}
       networks:
         - name: default
           pod: {}
       volumes:
-$(printf '%b' "${VOLUME_YAML}")
 EOF
+  printf '%s' "${VOLUME_LINES}"
+} > "${VM_FILE}"
+
+echo "Applying VM manifest ${VM_FILE}"
+oc apply -f "${VM_FILE}"
 
 if [[ "${START_VM}" == "true" ]]; then
   echo "Starting VM ${TARGET_NAMESPACE}/${VM_NAME}..."
