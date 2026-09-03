@@ -16,17 +16,15 @@ Usage:
     [--password <password>] \
     [--insecure]
 
-Bundle directory and VirtualMachineExport names are <vm>-<version>.
-Downloads use virtctl --port-forward so no export Route is required.
-
-Export volume names follow the PVC/DataVolume name (for example
-"windows"), not the VM spec volume name ("rootdisk").
+Supports both export types:
+  raw / gzip     KubeVirt disk image (preferred)
+  dir / tar.gz   filesystem PVC export; disk.img is extracted from the tarball
 EOF
 }
 
 require_base_commands() {
   local command
-  for command in bash oc awk cut grep sed sha256sum find sort mkdir cp date; do
+  for command in bash oc awk cut grep sed sha256sum find sort mkdir cp date tar; do
     command -v "${command}" >/dev/null 2>&1 || {
       echo "ERROR: Required command is missing: ${command}" >&2
       exit 127
@@ -52,52 +50,112 @@ collect_source_disks() {
       done > "${out}"
 }
 
-# VirtualMachineExport volume names are PVC/DV names, and Windows VMs also
-# export a TPM persistent-state volume (dir/tar.gz). Only raw/gzip volumes
-# are disk images we can seed with CDI.
+has_format() {
+  local formats=" $1 "
+  local wanted="$2"
+  echo "${formats}" | grep -Fq " ${wanted} "
+}
+
+is_skip_volume() {
+  case "$1" in
+    persistent-state*|*-persistent-state*) return 0 ;;
+  esac
+  return 1
+}
+
+export_formats_for() {
+  local wanted="$1" info_file="$2" name formats
+  while IFS=$'\t' read -r name formats; do
+    [[ "${name}" == "${wanted}" ]] || continue
+    echo "${formats}"
+    return 0
+  done < "${info_file}"
+  return 1
+}
+
+# Prefer a name match on the PVC/DV, then the VM volume name.
+# Accept raw/gzip first; fall back to tar.gz/dir filesystem exports.
 pick_export_volume() {
   local wanted="$1"
   local claim="$2"
   local info_file="$3"
   local name formats
 
-  if [[ -n "${claim}" ]]; then
+  for candidate in ${claim} ${wanted}; do
+    [[ -n "${candidate}" ]] || continue
     while IFS=$'\t' read -r name formats; do
-      [[ -n "${name}" ]] || continue
-      if [[ "${name}" == "${claim}" ]] && echo " ${formats} " | grep -Eq ' raw | gzip '; then
+      [[ "${name}" == "${candidate}" ]] || continue
+      if has_format "${formats}" raw || has_format "${formats}" gzip || \
+         has_format "${formats}" tar.gz || has_format "${formats}" dir; then
         echo "${name}"
         return 0
       fi
     done < "${info_file}"
-  fi
+  done
 
-  if [[ -n "${wanted}" ]]; then
-    while IFS=$'\t' read -r name formats; do
-      [[ -n "${name}" ]] || continue
-      if [[ "${name}" == "${wanted}" ]] && echo " ${formats} " | grep -Eq ' raw | gzip '; then
-        echo "${name}"
-        return 0
-      fi
-    done < "${info_file}"
-  fi
-
-  local raw_count=0 raw_name=""
+  local match_count=0 match_name=""
   while IFS=$'\t' read -r name formats; do
     [[ -n "${name}" ]] || continue
-    case "${name}" in
-      persistent-state*|*-persistent-state*) continue ;;
-    esac
-    if echo " ${formats} " | grep -Eq ' raw | gzip '; then
-      raw_count=$((raw_count + 1))
-      raw_name="${name}"
-    fi
+    is_skip_volume "${name}" && continue
+    match_count=$((match_count + 1))
+    match_name="${name}"
   done < "${info_file}"
 
-  if [[ "${raw_count}" -eq 1 ]]; then
-    echo "${raw_name}"
+  if [[ "${match_count}" -eq 1 ]]; then
+    echo "${match_name}"
     return 0
   fi
   return 1
+}
+
+extract_disk_from_archive() {
+  local archive="$1"
+  local dest="$2"
+  local tmp
+  tmp="$(mktemp -d "${BUNDLE}/.extract-XXXXXX")"
+
+  echo "Extracting filesystem export ${archive}..."
+  tar -xzf "${archive}" -C "${tmp}"
+
+  local found=""
+  found="$(find "${tmp}" -type f \( \
+    -name 'disk.img' -o -name 'disk.img.gz' -o -name '*.raw' -o \
+    -name '*.qcow2' -o -name 'disk' \
+  \) | head -n1 || true)"
+
+  if [[ -z "${found}" ]]; then
+    found="$(find "${tmp}" -type f -size +64M | sort | head -n1 || true)"
+  fi
+
+  if [[ -z "${found}" ]]; then
+    echo "ERROR: No disk image found in ${archive}" >&2
+    find "${tmp}" -type f >&2 || true
+    rm -rf "${tmp}"
+    return 1
+  fi
+
+  echo "Found disk image in archive: ${found}"
+  case "${found}" in
+    *.gz)
+      gzip -dc "${found}" > "${dest}"
+      ;;
+    *)
+      cp -f "${found}" "${dest}"
+      ;;
+  esac
+  rm -rf "${tmp}"
+}
+
+refresh_export_info() {
+  local out="$1"
+  oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
+    -o jsonpath='{range .status.links.internal.volumes[*]}{.name}{"\t"}{range .formats[*]}{.format}{" "}{end}{"\n"}{end}' \
+    > "${out}"
+  if [[ ! -s "${out}" ]]; then
+    oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
+      -o jsonpath='{range .status.links.external.volumes[*]}{.name}{"\t"}{range .formats[*]}{.format}{" "}{end}{"\n"}{end}' \
+      > "${out}"
+  fi
 }
 
 NS=""
@@ -198,7 +256,7 @@ while IFS=$'\t' read -r VOLUME_NAME PVC_NAME; do
   fi
   LOWER="$(echo "${VOLUME_NAME}" | tr '[:upper:]' '[:lower:]')"
   case "${LOWER}" in
-    *root*|*boot*|*os*|*system*)
+    *root*|*boot*|*os*|*system*|*c-drive*|*cdrive*)
       BOOT_VOLUME="${VOLUME_NAME}"
       break
       ;;
@@ -248,10 +306,6 @@ if oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" >/dev/null 2>&1; then
   virtctl vmexport delete "${EXPORT_NAME}" -n "${NS}" || true
 fi
 
-if oc get virtualmachineexport "abc-vm-export-${SAFE_VERSION}" -n "${NS}" >/dev/null 2>&1; then
-  virtctl vmexport delete "abc-vm-export-${SAFE_VERSION}" -n "${NS}" || true
-fi
-
 echo "Creating VM export ${EXPORT_NAME}..."
 virtctl vmexport create "${EXPORT_NAME}" \
   --vm="${VM}" \
@@ -268,17 +322,23 @@ if ! oc wait virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
 fi
 
 EXPORT_INFO="${BUNDLE}/export-volumes.tsv"
-oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
-  -o jsonpath='{range .status.links.internal.volumes[*]}{.name}{"\t"}{range .formats[*]}{.format}{" "}{end}{"\n"}{end}' \
-  > "${EXPORT_INFO}"
-if [[ ! -s "${EXPORT_INFO}" ]]; then
-  oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" \
-    -o jsonpath='{range .status.links.external.volumes[*]}{.name}{"\t"}{range .formats[*]}{.format}{" "}{end}{"\n"}{end}' \
-    > "${EXPORT_INFO}"
-fi
+echo "Waiting for export volume links..."
+for _ in $(seq 1 30); do
+  refresh_export_info "${EXPORT_INFO}"
+  if [[ -s "${EXPORT_INFO}" ]]; then
+    break
+  fi
+  sleep 5
+done
 
 echo "Export volumes:"
-cat "${EXPORT_INFO}"
+cat "${EXPORT_INFO}" || true
+
+if [[ ! -s "${EXPORT_INFO}" ]]; then
+  echo "ERROR: VirtualMachineExport is Ready but published no volume links." >&2
+  oc get virtualmachineexport "${EXPORT_NAME}" -n "${NS}" -o yaml >&2 || true
+  exit 1
+fi
 
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
@@ -286,24 +346,38 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   CLAIM_NAME="$(awk -F '\t' -v vol="${VOLUME_NAME}" '$1==vol {print $2; exit}' "${BUNDLE}/source-disks.tsv")"
   DOWNLOAD_VOLUME="$(pick_export_volume "${VOLUME_NAME}" "${CLAIM_NAME}" "${EXPORT_INFO}" || true)"
   if [[ -z "${DOWNLOAD_VOLUME}" ]]; then
-    echo "ERROR: Could not map VM volume ${VOLUME_NAME} (PVC/DV ${CLAIM_NAME}) to a raw/gzip export volume." >&2
+    echo "ERROR: Could not map VM volume ${VOLUME_NAME} (PVC/DV ${CLAIM_NAME}) to an export volume." >&2
     echo "Available export volumes:" >&2
     cat "${EXPORT_INFO}" >&2
     exit 1
   fi
 
+  FORMATS="$(export_formats_for "${DOWNLOAD_VOLUME}" "${EXPORT_INFO}" || true)"
   OUTPUT_FILE="${BUNDLE}/${FILE_NAME}"
-  echo "Downloading export volume ${DOWNLOAD_VOLUME} (VM volume ${VOLUME_NAME}, claim ${CLAIM_NAME}) to ${OUTPUT_FILE}..."
+  echo "Downloading export volume ${DOWNLOAD_VOLUME} [${FORMATS}] (VM volume ${VOLUME_NAME}, claim ${CLAIM_NAME})"
 
-  virtctl vmexport download "${EXPORT_NAME}" \
-    --namespace="${NS}" \
-    --volume="${DOWNLOAD_VOLUME}" \
-    --output="${OUTPUT_FILE}" \
-    --format=raw \
-    --keep-vme \
-    --insecure \
-    --port-forward \
-    --readiness-timeout=30m
+  if has_format "${FORMATS}" raw || has_format "${FORMATS}" gzip; then
+    virtctl vmexport download "${EXPORT_NAME}" \
+      --namespace="${NS}" \
+      --volume="${DOWNLOAD_VOLUME}" \
+      --output="${OUTPUT_FILE}" \
+      --format=raw \
+      --keep-vme \
+      --insecure \
+      --port-forward \
+      --readiness-timeout=30m
+  else
+    ARCHIVE="${BUNDLE}/${DOWNLOAD_VOLUME}.tar.gz"
+    virtctl vmexport download "${EXPORT_NAME}" \
+      --namespace="${NS}" \
+      --volume="${DOWNLOAD_VOLUME}" \
+      --output="${ARCHIVE}" \
+      --keep-vme \
+      --insecure \
+      --port-forward \
+      --readiness-timeout=30m
+    extract_disk_from_archive "${ARCHIVE}" "${OUTPUT_FILE}"
+  fi
 
 done < "${BUNDLE}/disks.tsv"
 
