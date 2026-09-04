@@ -14,12 +14,9 @@ Usage:
     [--memory <quantity>] \
     [--start]
 
-Disks are provisioned in this order:
-  1. CSI snapshot clone from the catalog DataSource, if a VolumeSnapshotClass exists
-  2. Otherwise virtctl image-upload from the bundle .raw files
-
-Host-assisted CDI clones on Filesystem/LVM are not used. Those crash on
-lost+found permission errors and look hung to field engineers.
+On LVM/TopoLVM, disks are always created with virtctl image-upload.
+CDI host-assisted clones and populators are skipped: they crash on
+lost+found or hang Pending. The script does not patch CDI to run as root.
 EOF
 }
 
@@ -46,16 +43,27 @@ disk_suffix() {
   fi
 }
 
+storage_is_lvm() {
+  local provisioner
+  provisioner="$(oc get storageclass "${STORAGE_CLASS}" -o jsonpath='{.provisioner}' 2>/dev/null || true)"
+  echo "${provisioner} ${STORAGE_CLASS}" | grep -Eiq 'topolvm|lvm|lvms|logicalvolume'
+}
+
 has_snapshot_class() {
   oc get volumesnapshotclass >/dev/null 2>&1 && \
     [[ -n "$(oc get volumesnapshotclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)" ]]
+}
+
+remove_target_disk() {
+  local name="$1"
+  oc delete dv "${name}" -n "${TARGET_NAMESPACE}" --ignore-not-found --wait=true || true
+  oc delete pvc "${name}" -n "${TARGET_NAMESPACE}" --ignore-not-found --wait=true || true
 }
 
 wait_dv_succeeded() {
   local ns="$1" name="$2" timeout_secs="${3:-7200}"
   local start now phase
   start="$(date +%s)"
-
   while true; do
     phase="$(oc get dv "${name}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     if [[ "${phase}" == "Succeeded" ]]; then
@@ -65,14 +73,6 @@ wait_dv_succeeded() {
       oc describe dv "${name}" -n "${ns}" >&2 || true
       return 1
     fi
-
-    if oc get pods -n "${ns}" --no-headers 2>/dev/null | grep -E "source-pod|clone" | grep -Eq 'CrashLoopBackOff|Error'; then
-      echo "ERROR: CDI clone/upload helper pod is failing in ${ns}." >&2
-      oc get pods -n "${ns}" | grep -E "source-pod|clone|upload" >&2 || true
-      oc describe dv "${name}" -n "${ns}" >&2 || true
-      return 1
-    fi
-
     now="$(date +%s)"
     if (( now - start > timeout_secs )); then
       echo "ERROR: Timed out waiting for DataVolume ${ns}/${name} (phase=${phase:-unknown})." >&2
@@ -94,6 +94,8 @@ upload_disk() {
     return 1
   }
 
+  remove_target_disk "${dv_name}"
+
   echo "Uploading ${image_path} -> ${TARGET_NAMESPACE}/${dv_name}"
   virtctl image-upload dv "${dv_name}" \
     --namespace="${TARGET_NAMESPACE}" \
@@ -111,70 +113,6 @@ upload_disk() {
     "abcvm.io/role=${role}" \
     "abcvm.io/vm=${VM_NAME}" \
     --overwrite >/dev/null 2>&1 || true
-}
-
-clone_disk() {
-  local dv_name="$1" role="$2" suffix="$3" size="$4" volume_mode="$5"
-
-  if [[ "${role}" == "boot" ]]; then
-    cat <<EOF | oc apply -f -
-apiVersion: cdi.kubevirt.io/v1beta1
-kind: DataVolume
-metadata:
-  name: ${dv_name}
-  namespace: ${TARGET_NAMESPACE}
-  annotations:
-    cdi.kubevirt.io/storage.usePopulator: "true"
-  labels:
-    abcvm.io/app: "${APP_ID}"
-    abcvm.io/version: "${VERSION}"
-    abcvm.io/role: "${role}"
-    abcvm.io/vm: "${VM_NAME}"
-spec:
-  sourceRef:
-    kind: DataSource
-    name: ${RELEASE_ID}
-    namespace: ${CATALOG_NAMESPACE}
-  storage:
-    storageClassName: ${STORAGE_CLASS}
-    accessModes:
-      - ReadWriteOnce
-    volumeMode: ${volume_mode}
-    resources:
-      requests:
-        storage: ${size}
-EOF
-  else
-    local source_pvc="${RELEASE_ID}-${suffix}"
-    oc get pvc "${source_pvc}" -n "${CATALOG_NAMESPACE}" >/dev/null || return 1
-    cat <<EOF | oc apply -f -
-apiVersion: cdi.kubevirt.io/v1beta1
-kind: DataVolume
-metadata:
-  name: ${dv_name}
-  namespace: ${TARGET_NAMESPACE}
-  annotations:
-    cdi.kubevirt.io/storage.usePopulator: "true"
-  labels:
-    abcvm.io/app: "${APP_ID}"
-    abcvm.io/version: "${VERSION}"
-    abcvm.io/role: "${role}"
-    abcvm.io/vm: "${VM_NAME}"
-spec:
-  source:
-    pvc:
-      namespace: ${CATALOG_NAMESPACE}
-      name: ${source_pvc}
-  storage:
-    storageClassName: ${STORAGE_CLASS}
-    accessModes:
-      - ReadWriteOnce
-    volumeMode: ${volume_mode}
-    resources:
-      requests:
-        storage: ${size}
-EOF
-  fi
 }
 
 BUNDLE=""
@@ -227,7 +165,7 @@ if [[ -f "${SCRIPT_DIR}/lib/oc-virtctl.sh" ]]; then
 else
   oc whoami >/dev/null
   command -v virtctl >/dev/null 2>&1 || {
-    echo "ERROR: virtctl is required for image-upload fallback." >&2
+    echo "ERROR: virtctl is required for image-upload." >&2
     exit 127
   }
 fi
@@ -240,14 +178,10 @@ if oc get vm "${VM_NAME}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
   exit 1
 fi
 
-USE_CLONE="false"
-if oc get namespace "${CATALOG_NAMESPACE}" >/dev/null 2>&1 && \
-   oc get datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >/dev/null 2>&1 && \
-   has_snapshot_class; then
-  USE_CLONE="true"
-  echo "VolumeSnapshotClass found; will try snapshot/populator clone from DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID}"
+if storage_is_lvm; then
+  echo "Storage class ${STORAGE_CLASS} is LVM/TopoLVM. Using virtctl image-upload (no CDI clone)."
 else
-  echo "No usable VolumeSnapshotClass (or catalog DataSource). Provisioning disks with virtctl image-upload."
+  echo "Provisioning disks with virtctl image-upload."
 fi
 
 USE_UEFI="false"
@@ -280,34 +214,17 @@ while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   VOL_NAME="${SUFFIX}"
   IMAGE_PATH="${BUNDLE}/${FILE_NAME}"
 
-  if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
-     oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
-    phase="$(oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    if [[ "${phase}" == "Succeeded" ]] || oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
-      echo "Reusing existing disk ${TARGET_NAMESPACE}/${TARGET_DV}"
-    else
-      echo "Removing incomplete disk ${TARGET_NAMESPACE}/${TARGET_DV} (phase=${phase:-unknown})"
-      oc delete dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" --wait=true || true
+  phase="$(oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  if [[ "${phase}" == "Succeeded" ]]; then
+    echo "Reusing ready disk ${TARGET_NAMESPACE}/${TARGET_DV}"
+  else
+    if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
+       oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
+      echo "Removing incomplete disk ${TARGET_NAMESPACE}/${TARGET_DV} (phase=${phase:-none})"
+      remove_target_disk "${TARGET_DV}"
     fi
-  fi
-
-  if ! oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 && \
-     ! oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
-    provisioned="false"
-    if [[ "${USE_CLONE}" == "true" ]]; then
-      echo "Cloning catalog disk to ${TARGET_NAMESPACE}/${TARGET_DV}..."
-      if clone_disk "${TARGET_DV}" "${ROLE}" "${SUFFIX}" "${PVC_SIZE}" "${VOLUME_MODE}" && \
-         wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 1800; then
-        provisioned="true"
-      else
-        echo "Snapshot/populator clone failed; falling back to image-upload."
-        oc delete dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" --wait=true || true
-      fi
-    fi
-    if [[ "${provisioned}" != "true" ]]; then
-      upload_disk "${TARGET_DV}" "${IMAGE_PATH}" "${PVC_SIZE}" "${VOLUME_MODE}" "${ROLE}"
-      wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 86400
-    fi
+    upload_disk "${TARGET_DV}" "${IMAGE_PATH}" "${PVC_SIZE}" "${VOLUME_MODE}" "${ROLE}"
+    wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 86400
   fi
 
   cat >> "${VOLUME_FILE}" <<EOF
