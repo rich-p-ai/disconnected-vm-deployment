@@ -13,6 +13,13 @@ Usage:
     [--cpu-cores <count>] \
     [--memory <quantity>] \
     [--start]
+
+Disks are provisioned in this order:
+  1. CSI snapshot clone from the catalog DataSource, if a VolumeSnapshotClass exists
+  2. Otherwise virtctl image-upload from the bundle .raw files
+
+Host-assisted CDI clones on Filesystem/LVM are not used. Those crash on
+lost+found permission errors and look hung to field engineers.
 EOF
 }
 
@@ -36,6 +43,137 @@ disk_suffix() {
     echo "boot"
   else
     echo "${volume_name}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//'
+  fi
+}
+
+has_snapshot_class() {
+  oc get volumesnapshotclass >/dev/null 2>&1 && \
+    [[ -n "$(oc get volumesnapshotclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)" ]]
+}
+
+wait_dv_succeeded() {
+  local ns="$1" name="$2" timeout_secs="${3:-7200}"
+  local start now phase
+  start="$(date +%s)"
+
+  while true; do
+    phase="$(oc get dv "${name}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "${phase}" == "Succeeded" ]]; then
+      return 0
+    fi
+    if [[ "${phase}" == "Failed" ]]; then
+      oc describe dv "${name}" -n "${ns}" >&2 || true
+      return 1
+    fi
+
+    if oc get pods -n "${ns}" --no-headers 2>/dev/null | grep -E "source-pod|clone" | grep -Eq 'CrashLoopBackOff|Error'; then
+      echo "ERROR: CDI clone/upload helper pod is failing in ${ns}." >&2
+      oc get pods -n "${ns}" | grep -E "source-pod|clone|upload" >&2 || true
+      oc describe dv "${name}" -n "${ns}" >&2 || true
+      return 1
+    fi
+
+    now="$(date +%s)"
+    if (( now - start > timeout_secs )); then
+      echo "ERROR: Timed out waiting for DataVolume ${ns}/${name} (phase=${phase:-unknown})." >&2
+      oc describe dv "${name}" -n "${ns}" >&2 || true
+      return 1
+    fi
+    echo "  ${ns}/${name} phase=${phase:-unknown}"
+    sleep 20
+  done
+}
+
+upload_disk() {
+  local dv_name="$1" image_path="$2" size="$3" volume_mode="$4" role="$5"
+  local mode_lower
+  mode_lower="$(echo "${volume_mode}" | tr '[:upper:]' '[:lower:]')"
+
+  [[ -f "${image_path}" ]] || {
+    echo "ERROR: Missing bundle image ${image_path}" >&2
+    return 1
+  }
+
+  echo "Uploading ${image_path} -> ${TARGET_NAMESPACE}/${dv_name}"
+  virtctl image-upload dv "${dv_name}" \
+    --namespace="${TARGET_NAMESPACE}" \
+    --size="${size}" \
+    --storage-class="${STORAGE_CLASS}" \
+    --volume-mode="${mode_lower}" \
+    --access-mode=ReadWriteOnce \
+    --image-path="${image_path}" \
+    --insecure \
+    --wait-secs=86400
+
+  oc label dv "${dv_name}" -n "${TARGET_NAMESPACE}" \
+    "abcvm.io/app=${APP_ID}" \
+    "abcvm.io/version=${VERSION}" \
+    "abcvm.io/role=${role}" \
+    "abcvm.io/vm=${VM_NAME}" \
+    --overwrite >/dev/null 2>&1 || true
+}
+
+clone_disk() {
+  local dv_name="$1" role="$2" suffix="$3" size="$4" volume_mode="$5"
+
+  if [[ "${role}" == "boot" ]]; then
+    cat <<EOF | oc apply -f -
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ${dv_name}
+  namespace: ${TARGET_NAMESPACE}
+  annotations:
+    cdi.kubevirt.io/storage.usePopulator: "true"
+  labels:
+    abcvm.io/app: "${APP_ID}"
+    abcvm.io/version: "${VERSION}"
+    abcvm.io/role: "${role}"
+    abcvm.io/vm: "${VM_NAME}"
+spec:
+  sourceRef:
+    kind: DataSource
+    name: ${RELEASE_ID}
+    namespace: ${CATALOG_NAMESPACE}
+  storage:
+    storageClassName: ${STORAGE_CLASS}
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: ${volume_mode}
+    resources:
+      requests:
+        storage: ${size}
+EOF
+  else
+    local source_pvc="${RELEASE_ID}-${suffix}"
+    oc get pvc "${source_pvc}" -n "${CATALOG_NAMESPACE}" >/dev/null || return 1
+    cat <<EOF | oc apply -f -
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ${dv_name}
+  namespace: ${TARGET_NAMESPACE}
+  annotations:
+    cdi.kubevirt.io/storage.usePopulator: "true"
+  labels:
+    abcvm.io/app: "${APP_ID}"
+    abcvm.io/version: "${VERSION}"
+    abcvm.io/role: "${role}"
+    abcvm.io/vm: "${VM_NAME}"
+spec:
+  source:
+    pvc:
+      namespace: ${CATALOG_NAMESPACE}
+      name: ${source_pvc}
+  storage:
+    storageClassName: ${STORAGE_CLASS}
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: ${volume_mode}
+    resources:
+      requests:
+        storage: ${size}
+EOF
   fi
 }
 
@@ -80,9 +218,21 @@ RELEASE_ID="${APP_ID}-${VERSION//[^a-zA-Z0-9-]/-}"
 CPU_CORES="${CPU_OVERRIDE:-${VM_CPU_CORES}}"
 MEMORY="${MEMORY_OVERRIDE:-${VM_MEMORY}}"
 
-oc whoami >/dev/null
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/lib/oc-virtctl.sh" ]]; then
+  # shellcheck source=lib/oc-virtctl.sh
+  source "${SCRIPT_DIR}/lib/oc-virtctl.sh"
+  ensure_logged_in
+  ensure_virtctl
+else
+  oc whoami >/dev/null
+  command -v virtctl >/dev/null 2>&1 || {
+    echo "ERROR: virtctl is required for image-upload fallback." >&2
+    exit 127
+  }
+fi
+
 oc get namespace "${TARGET_NAMESPACE}" >/dev/null
-oc get namespace "${CATALOG_NAMESPACE}" >/dev/null
 oc get storageclass "${STORAGE_CLASS}" >/dev/null
 
 if oc get vm "${VM_NAME}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
@@ -90,16 +240,14 @@ if oc get vm "${VM_NAME}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! oc get datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >/dev/null 2>&1; then
-  echo "ERROR: Catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} not found. Run seed first." >&2
-  exit 1
-fi
-
-echo "Waiting for catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} to become Ready..."
-if ! oc wait datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" --for=condition=Ready --timeout=15m; then
-  oc describe datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >&2 || true
-  echo "ERROR: Catalog DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID} is not Ready." >&2
-  exit 1
+USE_CLONE="false"
+if oc get namespace "${CATALOG_NAMESPACE}" >/dev/null 2>&1 && \
+   oc get datasource "${RELEASE_ID}" -n "${CATALOG_NAMESPACE}" >/dev/null 2>&1 && \
+   has_snapshot_class; then
+  USE_CLONE="true"
+  echo "VolumeSnapshotClass found; will try snapshot/populator clone from DataSource ${CATALOG_NAMESPACE}/${RELEASE_ID}"
+else
+  echo "No usable VolumeSnapshotClass (or catalog DataSource). Provisioning disks with virtctl image-upload."
 fi
 
 USE_UEFI="false"
@@ -113,8 +261,6 @@ fi
 echo "Target context: $(oc config current-context)"
 echo "Target namespace: ${TARGET_NAMESPACE}"
 echo "VM name: ${VM_NAME}"
-echo "Catalog namespace: ${CATALOG_NAMESPACE}"
-echo "Using DataSource: ${RELEASE_ID}"
 
 DISK_FILE="$(mktemp)"
 VOLUME_FILE="$(mktemp)"
@@ -123,76 +269,45 @@ trap 'rm -f "${DISK_FILE}" "${VOLUME_FILE}"' EXIT
 while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
   ROLE="$(strip_cr "${ROLE}")"
   VOLUME_NAME="$(strip_cr "${VOLUME_NAME}")"
+  FILE_NAME="$(strip_cr "${FILE_NAME}")"
   PVC_SIZE="$(strip_cr "${PVC_SIZE}")"
   VOLUME_MODE="$(strip_cr "${VOLUME_MODE}")"
   [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
+  [[ -n "${VOLUME_MODE}" ]] || VOLUME_MODE="Filesystem"
 
   SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
   TARGET_DV="${VM_NAME}-${SUFFIX}"
   VOL_NAME="${SUFFIX}"
+  IMAGE_PATH="${BUNDLE}/${FILE_NAME}"
+
+  if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
+     oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
+    phase="$(oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "${phase}" == "Succeeded" ]] || oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
+      echo "Reusing existing disk ${TARGET_NAMESPACE}/${TARGET_DV}"
+    else
+      echo "Removing incomplete disk ${TARGET_NAMESPACE}/${TARGET_DV} (phase=${phase:-unknown})"
+      oc delete dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" --wait=true || true
+    fi
+  fi
 
   if ! oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 && \
      ! oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
-    if [[ "${ROLE}" == "boot" ]]; then
-      cat <<EOF | oc apply -f -
-apiVersion: cdi.kubevirt.io/v1beta1
-kind: DataVolume
-metadata:
-  name: ${TARGET_DV}
-  namespace: ${TARGET_NAMESPACE}
-  labels:
-    abcvm.io/app: "${APP_ID}"
-    abcvm.io/version: "${VERSION}"
-    abcvm.io/role: "${ROLE}"
-    abcvm.io/vm: "${VM_NAME}"
-spec:
-  sourceRef:
-    kind: DataSource
-    name: ${RELEASE_ID}
-    namespace: ${CATALOG_NAMESPACE}
-  storage:
-    storageClassName: ${STORAGE_CLASS}
-    accessModes:
-      - ReadWriteOnce
-    volumeMode: ${VOLUME_MODE}
-    resources:
-      requests:
-        storage: ${PVC_SIZE}
-EOF
-    else
-      SOURCE_PVC="${RELEASE_ID}-${SUFFIX}"
-      oc get pvc "${SOURCE_PVC}" -n "${CATALOG_NAMESPACE}" >/dev/null || {
-        echo "ERROR: Source catalog PVC does not exist: ${CATALOG_NAMESPACE}/${SOURCE_PVC}" >&2
-        exit 1
-      }
-      cat <<EOF | oc apply -f -
-apiVersion: cdi.kubevirt.io/v1beta1
-kind: DataVolume
-metadata:
-  name: ${TARGET_DV}
-  namespace: ${TARGET_NAMESPACE}
-  labels:
-    abcvm.io/app: "${APP_ID}"
-    abcvm.io/version: "${VERSION}"
-    abcvm.io/role: "${ROLE}"
-    abcvm.io/vm: "${VM_NAME}"
-spec:
-  source:
-    pvc:
-      namespace: ${CATALOG_NAMESPACE}
-      name: ${SOURCE_PVC}
-  storage:
-    storageClassName: ${STORAGE_CLASS}
-    accessModes:
-      - ReadWriteOnce
-    volumeMode: ${VOLUME_MODE}
-    resources:
-      requests:
-        storage: ${PVC_SIZE}
-EOF
+    provisioned="false"
+    if [[ "${USE_CLONE}" == "true" ]]; then
+      echo "Cloning catalog disk to ${TARGET_NAMESPACE}/${TARGET_DV}..."
+      if clone_disk "${TARGET_DV}" "${ROLE}" "${SUFFIX}" "${PVC_SIZE}" "${VOLUME_MODE}" && \
+         wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 1800; then
+        provisioned="true"
+      else
+        echo "Snapshot/populator clone failed; falling back to image-upload."
+        oc delete dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" --wait=true || true
+      fi
     fi
-  else
-    echo "Reusing existing disk ${TARGET_NAMESPACE}/${TARGET_DV}"
+    if [[ "${provisioned}" != "true" ]]; then
+      upload_disk "${TARGET_DV}" "${IMAGE_PATH}" "${PVC_SIZE}" "${VOLUME_MODE}" "${ROLE}"
+      wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 86400
+    fi
   fi
 
   cat >> "${VOLUME_FILE}" <<EOF
@@ -215,19 +330,6 @@ EOF
                 bus: ${DISK_BUS}
 EOF
   fi
-done < "${BUNDLE}/disks.tsv"
-
-while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
-  ROLE="$(strip_cr "${ROLE}")"
-  VOLUME_NAME="$(strip_cr "${VOLUME_NAME}")"
-  [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
-  SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
-  TARGET_DV="${VM_NAME}-${SUFFIX}"
-
-  echo "Waiting for cloned DataVolume ${TARGET_NAMESPACE}/${TARGET_DV}..."
-  oc wait dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" \
-    --for=jsonpath='{.status.phase}'=Succeeded \
-    --timeout=4h
 done < "${BUNDLE}/disks.tsv"
 
 VM_FILE="${BUNDLE}/generated-${VM_NAME}-vm.yaml"
@@ -287,7 +389,6 @@ EOF
 } > "${VM_FILE}"
 
 echo "Applying VM manifest ${VM_FILE}"
-cat "${VM_FILE}"
 oc apply -f "${VM_FILE}"
 
 if [[ "${START_VM}" == "true" ]]; then
