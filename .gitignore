@@ -1,7 +1,14 @@
 # Appliance disk images
 *.raw
+*.raw.gz
 *.img
 *.qcow2
+*.tar.gz
+*.tgz
+
+# Transfer / bundle directories (local operator data)
+transfers/
+inbound/
 
 # Secrets and cluster credentials
 *secret*
