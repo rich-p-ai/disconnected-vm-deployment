@@ -22,10 +22,16 @@ ensure_logged_in() {
   exit 1
 }
 
-# Parse Kubernetes quantity (e.g. 120Gi, 500Mi) to bytes.
+# Parse Kubernetes quantity to bytes.
+# Accepts 120Gi / 500Mi / 1Ti and bare integers (API often returns bytes).
 quantity_to_bytes() {
   local qty="$1"
   local num unit
+  qty="$(printf '%s' "${qty}" | tr -d '[:space:]')"
+  if [[ "${qty}" =~ ^[0-9]+$ ]]; then
+    echo "${qty}"
+    return 0
+  fi
   if [[ "${qty}" =~ ^([0-9]+(\.[0-9]+)?)([EPTGMK]i?)$ ]]; then
     num="${BASH_REMATCH[1]}"
     unit="${BASH_REMATCH[3]}"
@@ -401,9 +407,9 @@ print_usb_instructions() {
 1. On this bastion, verify checksums:
      cd ${transfer_dir} && sha256sum -c checksums.sha256
 2. Copy the entire directory to removable media:
-     rsync -a ${transfer_dir}/ /media/usb/abc-vm-bundle/
+     rsync -a ${transfer_dir}/ /media/usb/vm-bundle/
 3. Carry media to the destination bastion.
-4. Copy from media to a local bundle path, then run kickoff-dest.sh with --bundle-path.
+4. Copy from media to a local bundle path, then run ./dest --bundle-path <dir>.
 
 NAS/NFS volume mounts are not supported in this release.
 
