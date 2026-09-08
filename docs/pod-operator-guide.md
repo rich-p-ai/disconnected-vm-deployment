@@ -15,12 +15,19 @@ Source cluster (Job)          Bastion (shuttle)              Dest cluster (Job)
 ────────────────────          ─────────────────              ────────────────────
 Stop VM, VMExport             transfer-dir/                  Verify checksums
 gzip disks in-cluster    -->  *.raw.gz + metadata    -->     seed catalog (if needed)
-Job PVC                       USB copy only                  image-upload deploy VM
+Job PVC                       USB copy only                  clone deploy (upload fallback)
 ```
 
 - **Build** runs on the **source** cluster.
 - **Dest** runs on the **disconnected destination** cluster (seed + deploy in one Job).
-- Dest deploy uses `virtctl image-upload` on LVM/TopoLVM (same as `deploy-abc-vm.sh`), not CDI clone.
+- After catalog seed, dest deploy **tries CDI clone** from the catalog DataSource (boot) and catalog PVCs (data). On LVM/TopoLVM or other rejections, it **falls back** to gunzip + `virtctl image-upload` from the compressed bundle (no second catalog upload).
+
+### Job PVC sizing
+
+| Job | Formula | Why |
+| --- | --- | --- |
+| Build (source) | **2 × sum(source PVC requests) + 10Gi** | Peak workspace while exporting: one full raw download, its `.gz`, plus prior compressed disks |
+| Dest | bundle size + largest disk + 10Gi | One raw extract at a time plus the compressed archive set on the PVC |
 
 ---
 
@@ -67,7 +74,7 @@ Optional: `--keep-export` leaves the `VirtualMachineExport` on the source cluste
 
 ### What happens
 
-1. Kickoff computes Job PVC size from source VM PVC requests + 10Gi overhead.
+1. Kickoff computes Job PVC size as **2× source VM PVC requests + 10Gi** (peak raw + gzip workspace).
 2. Creates SA, RBAC, LVM PVC, stages `virtctl` onto the PVC, ConfigMap, and Build Job.
 3. Job stops the VM, creates `VirtualMachineExport`, downloads each disk, **gzip compresses immediately**, writes `release.env`, `disks.tsv` (compressed filenames), `checksums.sha256`, and source metadata.
 4. Kickoff waits for Job success, copies **compressed bundle only** to `--transfer-dir/<app-id>-<version>/`.
@@ -136,8 +143,10 @@ Add `--start` to create the VM and set `spec.running: true`.
 5. Job verifies checksums.
 6. If `DataSource ${APP_ID}-${VERSION}` in catalog is **already Ready**, **skips seed**.
 7. Else seeds catalog one disk at a time: gunzip → `virtctl image-upload` → delete raw → next disk.
-8. Deploys VM via `virtctl image-upload` into `--namespace` (LVM-safe path).
+8. Deploys VM disks by **CDI clone** from catalog (`spec.sourceRef` for boot, `spec.source.pvc` for data). If clone fails or is rejected (typical on LVM/TopoLVM), falls back to gunzip + `virtctl image-upload` from the bundle — **without re-uploading to the catalog**.
 9. VM left **stopped** unless `--start`.
+
+Kickoff retries `oc logs -f` until the Job pod container exists (avoids a race at Job start).
 
 ---
 
@@ -220,7 +229,7 @@ Kickoff picks an image already on the cluster:
 - Boot disk selected by volume name heuristics — review `disks.tsv`.
 - Export is crash-consistent; use clean guest shutdown for app consistency.
 - One boot disk; unique roles for additional disks.
-- LVM deploy uses image-upload, not CDI clone (see `deploy-abc-vm.sh`).
+- After seed, deploy tries catalog clone first; LVM/TopoLVM usually triggers image-upload fallback (logged explicitly).
 - `disks.tsv` from pod build lists **compressed** filenames; bastion fallback bundles use `.raw`.
 
 ---

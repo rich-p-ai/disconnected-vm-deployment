@@ -154,8 +154,16 @@ wait_for_job_complete() {
 
 stream_job_logs() {
   local ns="$1" job="$2"
+  local i
   echo "Streaming logs for job/${job}..."
-  oc logs -f "job/${job}" -n "${ns}" || true
+  for i in $(seq 1 120); do
+    if oc logs "job/${job}" -n "${ns}" --tail=1 >/dev/null 2>&1; then
+      oc logs -f "job/${job}" -n "${ns}" || true
+      return 0
+    fi
+    sleep 2
+  done
+  echo "WARNING: Job pod not ready for log streaming yet; continuing to wait for Job completion." >&2
 }
 
 # Resolve virtctl on bastion and stage onto Job PVC at /work/bin/virtctl

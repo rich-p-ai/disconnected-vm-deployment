@@ -57,6 +57,12 @@ wait_dv_succeeded() {
       oc describe dv "${name}" -n "${ns}" >&2 || true
       return 1
     fi
+    if oc get pods -n "${ns}" --no-headers 2>/dev/null | grep -E 'source-pod|clone' | grep -Eq 'CrashLoopBackOff|Error'; then
+      echo "ERROR: CDI clone helper pod is failing in ${ns}." >&2
+      oc get pods -n "${ns}" | grep -E 'source-pod|clone|upload' >&2 || true
+      oc describe dv "${name}" -n "${ns}" >&2 || true
+      return 1
+    fi
     now="$(date +%s)"
     if (( now - start > timeout_secs )); then
       echo "ERROR: Timed out waiting for DataVolume ${ns}/${name}." >&2
@@ -103,6 +109,114 @@ upload_disk() {
     --image-path="${image_path}" \
     --insecure \
     --wait-secs=86400
+}
+
+clone_disk_to_target() {
+  local dv_name="$1" role="$2" suffix="$3" size="$4" volume_mode="$5"
+  local mode_lower
+  mode_lower="$(echo "${volume_mode}" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "${role}" == "boot" ]]; then
+    cat <<EOF | oc apply -f -
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ${dv_name}
+  namespace: ${TARGET_NAMESPACE}
+  annotations:
+    cdi.kubevirt.io/storage.usePopulator: "true"
+  labels:
+    abcvm.io/app: "${APP_ID}"
+    abcvm.io/version: "${VERSION}"
+    abcvm.io/role: "${role}"
+    abcvm.io/vm: "${VM_NAME}"
+spec:
+  sourceRef:
+    kind: DataSource
+    name: ${RELEASE_ID}
+    namespace: ${CATALOG_NAMESPACE}
+  storage:
+    storageClassName: ${STORAGE_CLASS}
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: ${mode_lower}
+    resources:
+      requests:
+        storage: ${size}
+EOF
+  else
+    local source_pvc="${RELEASE_ID}-${suffix}"
+    oc get pvc "${source_pvc}" -n "${CATALOG_NAMESPACE}" >/dev/null || return 1
+    cat <<EOF | oc apply -f -
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ${dv_name}
+  namespace: ${TARGET_NAMESPACE}
+  annotations:
+    cdi.kubevirt.io/storage.usePopulator: "true"
+  labels:
+    abcvm.io/app: "${APP_ID}"
+    abcvm.io/version: "${VERSION}"
+    abcvm.io/role: "${role}"
+    abcvm.io/vm: "${VM_NAME}"
+spec:
+  source:
+    pvc:
+      namespace: ${CATALOG_NAMESPACE}
+      name: ${source_pvc}
+  storage:
+    storageClassName: ${STORAGE_CLASS}
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: ${mode_lower}
+    resources:
+      requests:
+        storage: ${size}
+EOF
+  fi
+}
+
+provision_target_disk() {
+  local ROLE="$1" VOLUME_NAME="$2" FILE_NAME="$3" PVC_SIZE="$4" VOLUME_MODE="$5"
+  local SUFFIX TARGET_DV GZ_PATH RAW_PATH phase
+  SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
+  TARGET_DV="${VM_NAME}-${SUFFIX}"
+  GZ_PATH="${BUNDLE}/${FILE_NAME}"
+  RAW_PATH="${BUNDLE}/.tmp-deploy-${SUFFIX}.raw"
+
+  phase="$(oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  if [[ "${phase}" == "Succeeded" ]]; then
+    echo "Reusing ready disk ${TARGET_NAMESPACE}/${TARGET_DV}"
+    return 0
+  fi
+
+  if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
+     oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
+    echo "Removing incomplete disk ${TARGET_NAMESPACE}/${TARGET_DV} (phase=${phase:-none})"
+    remove_target_disk "${TARGET_NAMESPACE}" "${TARGET_DV}"
+  fi
+
+  echo "Trying CDI clone from catalog -> ${TARGET_NAMESPACE}/${TARGET_DV}..."
+  if clone_disk_to_target "${TARGET_DV}" "${ROLE}" "${SUFFIX}" "${PVC_SIZE}" "${VOLUME_MODE}" && \
+     wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 1800; then
+    echo "Clone succeeded for ${TARGET_NAMESPACE}/${TARGET_DV}"
+  else
+    echo "WARNING: CDI clone from catalog rejected or failed for ${TARGET_DV} (common on LVM/TopoLVM)."
+    echo "Falling back to gunzip + virtctl image-upload from compressed bundle."
+    remove_target_disk "${TARGET_NAMESPACE}" "${TARGET_DV}"
+    gunzip_one_disk "${GZ_PATH}" "${RAW_PATH}"
+    upload_disk "${TARGET_NAMESPACE}" "${TARGET_DV}" "${RAW_PATH}" "${PVC_SIZE}" "${VOLUME_MODE}"
+    rm -f "${RAW_PATH}"
+    wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 86400
+  fi
+
+  oc label dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" \
+    "abcvm.io/app=${APP_ID}" \
+    "abcvm.io/version=${VERSION}" \
+    "abcvm.io/role=${ROLE}" \
+    "abcvm.io/vm=${VM_NAME}" \
+    --overwrite >/dev/null 2>&1 || true
 }
 
 seed_catalog() {
@@ -197,7 +311,7 @@ deploy_vm() {
     DISK_BUS="sata"
   fi
 
-  echo "Deploying VM ${TARGET_NAMESPACE}/${VM_NAME} (LVM image-upload, no CDI clone)..."
+  echo "Deploying VM ${TARGET_NAMESPACE}/${VM_NAME} (catalog clone first, image-upload fallback)..."
 
   while IFS=$'\t' read -r ROLE VOLUME_NAME FILE_NAME PVC_SIZE VOLUME_MODE; do
     ROLE="$(strip_cr "${ROLE}")"
@@ -208,33 +322,12 @@ deploy_vm() {
     [[ -n "${ROLE}" && "${ROLE}" != \#* ]] || continue
     [[ -n "${VOLUME_MODE}" ]] || VOLUME_MODE="Filesystem"
 
-    local SUFFIX TARGET_DV VOL_NAME GZ_PATH RAW_PATH phase
+    local SUFFIX TARGET_DV VOL_NAME
     SUFFIX="$(disk_suffix "${ROLE}" "${VOLUME_NAME}")"
     TARGET_DV="${VM_NAME}-${SUFFIX}"
     VOL_NAME="${SUFFIX}"
-    GZ_PATH="${BUNDLE}/${FILE_NAME}"
-    RAW_PATH="${BUNDLE}/.tmp-deploy-${SUFFIX}.raw"
 
-    phase="$(oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    if [[ "${phase}" == "Succeeded" ]]; then
-      echo "Reusing ready disk ${TARGET_NAMESPACE}/${TARGET_DV}"
-    else
-      if oc get dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1 || \
-         oc get pvc "${TARGET_DV}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
-        remove_target_disk "${TARGET_NAMESPACE}" "${TARGET_DV}"
-      fi
-      gunzip_one_disk "${GZ_PATH}" "${RAW_PATH}"
-      upload_disk "${TARGET_NAMESPACE}" "${TARGET_DV}" "${RAW_PATH}" "${PVC_SIZE}" "${VOLUME_MODE}"
-      rm -f "${RAW_PATH}"
-      wait_dv_succeeded "${TARGET_NAMESPACE}" "${TARGET_DV}" 86400
-    fi
-
-    oc label dv "${TARGET_DV}" -n "${TARGET_NAMESPACE}" \
-      "abcvm.io/app=${APP_ID}" \
-      "abcvm.io/version=${VERSION}" \
-      "abcvm.io/role=${ROLE}" \
-      "abcvm.io/vm=${VM_NAME}" \
-      --overwrite >/dev/null 2>&1 || true
+    provision_target_disk "${ROLE}" "${VOLUME_NAME}" "${FILE_NAME}" "${PVC_SIZE}" "${VOLUME_MODE}"
 
     cat >> "${VOLUME_FILE}" <<EOF
         - name: ${VOL_NAME}

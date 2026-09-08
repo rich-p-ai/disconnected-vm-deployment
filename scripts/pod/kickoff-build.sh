@@ -75,9 +75,9 @@ SRC_BYTES="$(compute_source_pvc_bytes "${NS}" "${VM}")"
   exit 1
 }
 OVERHEAD_BYTES="$(quantity_to_bytes "10Gi")"
-PVC_BYTES=$((SRC_BYTES + OVERHEAD_BYTES))
+PVC_BYTES=$((2 * SRC_BYTES + OVERHEAD_BYTES))
 PVC_SIZE="$(bytes_to_gi "${PVC_BYTES}")"
-echo "Job PVC size: ${PVC_SIZE} (source PVC sum + 10Gi overhead)"
+echo "Job PVC size: ${PVC_SIZE} (2× source PVC sum + 10Gi peak workspace for raw+gzip)"
 
 JOB_IMAGE="$(resolve_job_image)"
 echo "Job image: ${JOB_IMAGE}"
