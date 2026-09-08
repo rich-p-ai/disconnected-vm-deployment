@@ -1,247 +1,144 @@
-# Pod Operator Guide — ABC VM USB Shuttle
+# Pod deployment guide
 
-This guide covers the **pod-based** ABC VM workflow: heavy export/compress and seed/deploy run in OpenShift Jobs on each cluster. The bastion holds code and kickoff only. **Raw disks never land on the bastion** — only compressed archives (`*.raw.gz`) and metadata are copied via USB / sneaker-net.
+Copy a VM from a source OpenShift Virtualization cluster to a disconnected cluster using Jobs. The bastion only runs kickoff. Disks are compressed on the source cluster. USB carries `*.raw.gz` only.
 
-NAS/NFS volume mounts and RWX shared storage are **out of scope** for this release.
+**Toolkit folder:** [`vm-tools/`](../vm-tools/). Copy that folder to each bastion. Techs start at [`vm-tools/START-HERE.txt`](../vm-tools/START-HERE.txt).
 
-For the legacy path where raw disks are exported directly to the bastion, see [Builder guide](builder-guide.md) and [End-user deployment guide](end-user-deployment.md).
+Storage class on these clusters is **`LVM`** (OpenShift LVMS, local RWO). Pass that name exactly. It is not an external LVM array.
+
+NAS/NFS is not supported in this release.
 
 ---
 
-## Architecture
+## What runs where
 
 ```text
-Source cluster (Job)          Bastion (shuttle)              Dest cluster (Job)
-────────────────────          ─────────────────              ────────────────────
-Stop VM, VMExport             transfer-dir/                  Verify checksums
-gzip disks in-cluster    -->  *.raw.gz + metadata    -->     seed catalog (if needed)
-Job PVC                       USB copy only                  clone deploy (upload fallback)
+Source cluster Job              USB                   Dest cluster Job
+------------------              ---                   ----------------
+Stop VM, export disks     -->   *.raw.gz        -->   Seed vm-catalog (if needed)
+gzip on a Job PVC               metadata              Create VM in user project
 ```
 
-- **Build** runs on the **source** cluster.
-- **Dest** runs on the **disconnected destination** cluster (seed + deploy in one Job).
-- After catalog seed, dest deploy **tries CDI clone** from the catalog DataSource (boot) and catalog PVCs (data). On LVM/TopoLVM or other rejections, it **falls back** to gunzip + `virtctl image-upload` from the compressed bundle (no second catalog upload).
-
-### Job PVC sizing
-
-| Job | Formula | Why |
+| Step | Who | Command |
 | --- | --- | --- |
-| Build (source) | **2 × sum(source PVC requests) + 10Gi** | Peak workspace while exporting: one full raw download, its `.gz`, plus prior compressed disks |
-| Dest | bundle size + largest disk + 10Gi | One raw extract at a time plus the compressed archive set on the PVC |
+| Build | Source bastion, logged into source API | `cd vm-tools && ./build ...` |
+| Carry | USB | The transfer directory only |
+| Seed + deploy | Dest bastion, logged into dest API | `cd vm-tools && ./dest ...` |
+
+`./dest` is one command: seed catalog if the DataSource is not Ready, then create the VM. Default VM state is stopped.
+
+On `LVM`, CDI clone usually fails. The Job then gunzips one disk at a time and uses `virtctl image-upload` into the user project. That fallback is expected.
 
 ---
 
 ## Prerequisites
 
-### Bastion (both clusters)
-
-- Bash, `oc`, network access to the cluster API you are logged into.
-- `virtctl` on the bastion **or** ability to bootstrap it from the cluster (`scripts/lib/oc-virtctl.sh`).
-- Cluster-admin (or equivalent) to create Job SA, RBAC, PVC, ConfigMap, and Job.
-- Removable media for USB transfer between bastions.
-
-### Source cluster
-
-- OpenShift Virtualization installed.
-- Source VM uses **PVC-backed disks** only.
-- VM can be stopped for export (Job stops it if running).
-- LVM (or caller-chosen) `StorageClass` for the Job work PVC.
-
-### Destination cluster
-
-- OpenShift Virtualization + CDI installed.
-- LVM `StorageClass` for Job work PVC and target VM disks.
-- Catalog namespace (default `vm-catalog`; created by kickoff if missing).
+- Cluster-admin `oc` login to the cluster you are targeting
+- `virtctl` on the bastion, or CNV so kickoff can stage it
+- OpenShift Virtualization on source; Virtualization + CDI on dest
+- Source VM: PVC-backed disks, can be stopped
+- StorageClass `LVM` exists (`oc get storageclass LVM`)
+- First test: one small disk (20–40Gi), not a production image
 
 ---
 
-## Source: build kickoff
-
-Log in to the **source** cluster on the bastion, then from the repo root:
+## Source — build
 
 ```bash
-chmod 0750 scripts/pod/kickoff-build.sh scripts/pod/kickoff-dest.sh
+cd vm-tools
+chmod 0750 build dest
+oc whoami
+oc get storageclass LVM
 
-./scripts/pod/kickoff-build.sh \
-  --namespace my-source-ns \
-  --vm abc-vm \
-  --version 1.0.0 \
-  --storage-class lvms-vg1 \
-  --transfer-dir /srv/abc-vm/transfers
+./build \
+  --namespace <source-project> \
+  --vm <source-vm> \
+  --version 0.1.0-test \
+  --storage-class LVM \
+  --transfer-dir /tmp/vm-transfer
 ```
 
-Optional: `--keep-export` leaves the `VirtualMachineExport` on the source cluster after the Job completes.
+`--keep-export` is optional and leaves the VirtualMachineExport in place.
 
-### What happens
+**Pass:** `/tmp/vm-transfer/<vm>-0.1.0-test/` has `*.raw.gz`, `release.env`, `disks.tsv`, `checksums.sha256`. No `*.raw`. Checksums verify.
 
-1. Kickoff computes Job PVC size as **2× source VM PVC requests + 10Gi** (peak raw + gzip workspace).
-2. Creates SA, RBAC, LVM PVC, stages `virtctl` onto the PVC, ConfigMap, and Build Job.
-3. Job stops the VM, creates `VirtualMachineExport`, downloads each disk, **gzip compresses immediately**, writes `release.env`, `disks.tsv` (compressed filenames), `checksums.sha256`, and source metadata.
-4. Kickoff waits for Job success, copies **compressed bundle only** to `--transfer-dir/<app-id>-<version>/`.
-5. Prints checksums and USB instructions.
+Work PVC size is `2 ×` source PVC sum `+ 10Gi` so gzip has room.
 
-### Bundle contents (compressed)
+On `LVM` the staging pod and Job must land on the same node. If the Job is Pending, check PVC node and pod events.
+
+---
+
+## USB
+
+Copy the transfer directory only:
 
 ```text
-abc-vm-1.0.0/
-├── release.env
-├── disks.tsv              # file column is *.raw.gz
-├── checksums.sha256       # hashes of compressed files only
-├── source-vm.yaml
-├── source-pvcs.yaml
-├── source-disks.tsv
-├── rootdisk.raw.gz
-└── datadisk.raw.gz        # if present
+/tmp/vm-transfer/<vm>-0.1.0-test/
+  release.env
+  disks.tsv
+  checksums.sha256
+  source-vm.yaml
+  source-pvcs.yaml
+  source-disks.tsv
+  *.raw.gz
+```
+
+Also copy `vm-tools/` if the dest bastion does not have it.
+
+Do not copy `*.raw`. Dest refuses a bundle that contains raw disks.
+
+On dest:
+
+```bash
+cd /path/to/<vm>-0.1.0-test && sha256sum -c checksums.sha256
 ```
 
 ---
 
-## USB / sneaker-net transfer
-
-On **source bastion**:
+## Dest — seed + deploy
 
 ```bash
-cd /srv/abc-vm/transfers/abc-vm-1.0.0
-sha256sum -c checksums.sha256
+cd vm-tools
+oc get ns <user-project> || oc new-project <user-project>
 
-# Copy to removable media (example)
-rsync -a /srv/abc-vm/transfers/abc-vm-1.0.0/ /media/usb/abc-vm-1.0.0/
-```
-
-Physically move media to the **destination bastion**, then:
-
-```bash
-rsync -a /media/usb/abc-vm-1.0.0/ /srv/abc-vm/inbound/abc-vm-1.0.0/
-cd /srv/abc-vm/inbound/abc-vm-1.0.0 && sha256sum -c checksums.sha256
-```
-
-Do **not** copy uncompressed `*.raw` files. If the bundle contains `.raw` files, `kickoff-dest.sh` refuses to run.
-
----
-
-## Destination: seed + deploy kickoff
-
-Log in to the **destination** cluster, then:
-
-```bash
-./scripts/pod/kickoff-dest.sh \
-  --bundle-path /srv/abc-vm/inbound/abc-vm-1.0.0 \
-  --storage-class lvms-vg1 \
+./dest \
+  --bundle-path /path/to/<vm>-0.1.0-test \
+  --storage-class LVM \
   --catalog-namespace vm-catalog \
-  --namespace user-project \
-  --vm-name my-abc-vm
+  --namespace <user-project> \
+  --vm-name <new-vm>
 ```
 
-Add `--start` to create the VM and set `spec.running: true`.
+Add `--start` only when you intend to power the VM on immediately.
 
-### What happens
+**Pass:** Job completes. `DataSource` in `vm-catalog` is Ready. VM exists in the user project and is stopped unless `--start`.
 
-1. Validates bundle (metadata, checksums, `*.raw.gz` only — no raw).
-2. Fails if VM `--vm-name` already exists in `--namespace`.
-3. Creates dest Job SA, RBAC (including catalog clone grant), LVM PVC.
-4. `oc cp` compressed bundle from bastion onto Job PVC.
-5. Job verifies checksums.
-6. If `DataSource ${APP_ID}-${VERSION}` in catalog is **already Ready**, **skips seed**.
-7. Else seeds catalog one disk at a time: gunzip → `virtctl image-upload` → delete raw → next disk.
-8. Deploys VM disks by **CDI clone** from catalog (`spec.sourceRef` for boot, `spec.source.pvc` for data). If clone fails or is rejected (typical on LVM/TopoLVM), falls back to gunzip + `virtctl image-upload` from the bundle — **without re-uploading to the catalog**.
-9. VM left **stopped** unless `--start`.
-
-Kickoff retries `oc logs -f` until the Job pod container exists (avoids a race at Job start).
+If that DataSource is already Ready, seed is skipped and only the new VM is created.
 
 ---
 
-## Watching Jobs
+## Watch and clean up
+
+Job names are printed by `./build` and `./dest`.
 
 ```bash
-# Replace ns and job name from kickoff output
-oc get jobs -n <namespace>
 oc logs -f job/<job-name> -n <namespace>
 oc describe job/<job-name> -n <namespace>
 ```
 
-Build Job timeout: 24h. Dest Job timeout: 48h (large uploads).
+Build timeout 24h. Dest timeout 48h.
+
+Delete the previous Job and work PVC before a retry of the same name. Do not delete `vm-catalog` goldens unless you intend to re-seed.
+
+The scripts print the exact `oc delete` lines.
 
 ---
 
-## Reruns
+## Limits
 
-| Situation | Behavior |
-| --- | --- |
-| DataSource already Ready | Dest Job skips catalog seed; deploy proceeds |
-| Same Job name still exists | Kickoff fails — delete previous Job/PVC first |
-| VM name already exists | Kickoff and Job fail hard |
-| Partial failed seed | Resolve or delete stuck catalog DVs manually before retry |
+- Minimal VM spec (CPU, memory, virtio/sata, default pod network). Source firmware/networks/cloud-init are not copied except a UEFI detect for bootloader flags.
+- Boot disk is chosen by volume name. Check `disks.tsv`.
+- Export is crash-consistent. Shut the guest down cleanly first.
+- No new container image is pushed. Kickoff uses in-cluster `openshift/cli` (or CNV) and stages `virtctl` onto the Job PVC.
 
----
-
-## Failure and cleanup
-
-If a Job fails, inspect logs first:
-
-```bash
-oc logs job/<job-name> -n <namespace>
-oc describe job/<job-name> -n <namespace>
-```
-
-Remove Job resources (cluster-admin):
-
-**Build (source namespace):**
-
-```bash
-JOB=abc-build-abc-vm-1.0.0
-NS=my-source-ns
-oc delete job "${JOB}" -n "${NS}" --ignore-not-found
-oc delete pvc "${JOB}-work" configmap "${JOB}-scripts" \
-  sa "${JOB}" role "${JOB}" rolebinding "${JOB}" -n "${NS}" --ignore-not-found
-```
-
-**Dest (user namespace + catalog):**
-
-```bash
-JOB=abc-dest-my-abc-vm-abc-vm-1-0-0
-NS=user-project
-CAT=vm-catalog
-oc delete job "${JOB}" -n "${NS}" --ignore-not-found
-oc delete pvc "${JOB}-work" configmap "${JOB}-scripts" -n "${NS}" --ignore-not-found
-oc delete sa "${JOB}" role "${JOB}" rolebinding "${JOB}" -n "${NS}" --ignore-not-found
-oc delete role "${JOB}-catalog" rolebinding "${JOB}-catalog" -n "${CAT}" --ignore-not-found
-oc delete clusterrolebinding "${JOB}-catalog-cloner" --ignore-not-found
-```
-
-Golden catalog objects in `vm-catalog` are **not** deleted by cleanup above.
-
----
-
-## Container image selection
-
-Kickoff picks an image already on the cluster:
-
-1. `openshift/cli` ImageStream (preferred)
-2. Else `virt-operator` / CDI operator image from `openshift-cnv`
-
-`virtctl` is copied from the bastion (or a cluster pod) onto the Job PVC at `/work/bin/virtctl`. No custom container image is built or pushed.
-
----
-
-## Known limitations (unchanged)
-
-- Minimal VirtualMachine spec (CPU, memory, virtio/sata disks, default pod network).
-- Boot disk selected by volume name heuristics — review `disks.tsv`.
-- Export is crash-consistent; use clean guest shutdown for app consistency.
-- One boot disk; unique roles for additional disks.
-- After seed, deploy tries catalog clone first; LVM/TopoLVM usually triggers image-upload fallback (logged explicitly).
-- `disks.tsv` from pod build lists **compressed** filenames; bastion fallback bundles use `.raw`.
-
----
-
-## Bastion fallback (raw on bastion)
-
-If Jobs are unavailable or you already have a raw bundle:
-
-| Step | Script |
-| --- | --- |
-| Build | `scripts/build-abc-vm-package.sh` |
-| Seed | `scripts/seed-abc-vm-catalog.sh` |
-| Deploy | `scripts/deploy-abc-vm.sh` |
-
-See [Builder guide](builder-guide.md) and [End-user deployment guide](end-user-deployment.md).
+Legacy bastion path (raw on the bastion): `scripts/build-abc-vm-package.sh`, `scripts/seed-abc-vm-catalog.sh`, `scripts/deploy-abc-vm.sh`. See [builder-guide.md](builder-guide.md) and [end-user-deployment.md](end-user-deployment.md).
