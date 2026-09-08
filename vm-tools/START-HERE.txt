@@ -1,0 +1,51 @@
+VM TOOLS — disconnected OpenShift VM copy
+Read this first. Do the steps in order. Do not improvise.
+
+This folder is the tech entrypoint. Keep it next to the repo `scripts/` and `manifests/` directories (download the repo zip, then cd vm-tools).
+
+Storage class on these clusters is:  LVM
+You must be logged in with oc (cluster-admin) before you run anything.
+
+------------------------------------------------
+ON THE BASTION
+------------------------------------------------
+  chmod 0750 build dest
+  oc whoami
+  oc get storageclass LVM
+
+------------------------------------------------
+1. SOURCE CLUSTER — BUILD
+------------------------------------------------
+  ./build \
+    --namespace <source-project> \
+    --vm <source-vm-name> \
+    --version 0.1.0-test \
+    --storage-class LVM \
+    --transfer-dir /tmp/vm-transfer
+
+PASS: /tmp/vm-transfer/<vm>-0.1.0-test/ has *.raw.gz and checksums.sha256, no *.raw
+      cd that dir && sha256sum -c checksums.sha256
+
+------------------------------------------------
+2. USB
+------------------------------------------------
+Copy /tmp/vm-transfer/<vm>-0.1.0-test/
+Do NOT copy *.raw
+On dest: sha256sum -c checksums.sha256
+
+Also copy this repo (or at least vm-tools + scripts + manifests) if dest does not have it.
+
+------------------------------------------------
+3. DEST CLUSTER — SEED + CREATE VM
+------------------------------------------------
+  oc get ns <user-project> || oc new-project <user-project>
+
+  ./dest \
+    --bundle-path /path/to/<vm>-0.1.0-test \
+    --storage-class LVM \
+    --catalog-namespace vm-catalog \
+    --namespace <user-project> \
+    --vm-name <new-vm-name>
+
+Leave off --start unless told to power the VM on.
+Clone-failed / image-upload fallback is normal on LVM.
