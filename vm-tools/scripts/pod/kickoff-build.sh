@@ -16,6 +16,7 @@ Run on the source-cluster bastion (oc login to source cluster).
 Creates a Build Job that exports and compresses VM disks in-cluster.
 Copies only compressed artifacts to --transfer-dir on this bastion.
 Raw disks never land on the bastion.
+Use --transfer-dir /tmp/vm-transfer or $HOME/vm-transfer. Do not use /home/data unless you own it.
 EOF
 }
 
@@ -54,6 +55,8 @@ ensure_logged_in
   exit 2
 }
 
+ensure_writable_dir "${TRANSFER_DIR}"
+
 oc get vm "${VM}" -n "${NS}" >/dev/null
 oc get storageclass "${STORAGE_CLASS}" >/dev/null
 
@@ -83,7 +86,7 @@ SRC_BYTES="$(compute_source_pvc_bytes "${NS}" "${VM}")"
 OVERHEAD_BYTES="$(quantity_to_bytes "10Gi")"
 PVC_BYTES=$((SRC_BYTES + OVERHEAD_BYTES))
 PVC_SIZE="$(bytes_to_gi "${PVC_BYTES}")"
-echo "Job PVC size: ${PVC_SIZE} (1× source PVC sum + 10Gi; gzip download, no raw unpack)"
+echo "Job PVC size: ${PVC_SIZE} (1× source PVC sum + 10Gi workspace)"
 
 JOB_IMAGE="$(resolve_job_image)"
 echo "Job image: ${JOB_IMAGE}"
@@ -121,9 +124,9 @@ fi
 kill "${LOG_PID}" 2>/dev/null || true
 wait "${LOG_PID}" 2>/dev/null || true
 
-mkdir -p "${TRANSFER_DIR}"
+ensure_writable_dir "${TRANSFER_DIR}"
 BUNDLE_LOCAL="${TRANSFER_DIR}/${SAFE_VM}-${VERSION}"
-mkdir -p "${BUNDLE_LOCAL}"
+ensure_writable_dir "${BUNDLE_LOCAL}"
 
 echo "Copying compressed bundle from Job PVC to ${BUNDLE_LOCAL}..."
 copy_pvc_to_local "${NS}" "${PVC_NAME}" "${SA_NAME}" "${JOB_IMAGE}" "${STAGING_POD}" "${BUNDLE_LOCAL}"

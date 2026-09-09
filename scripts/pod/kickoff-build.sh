@@ -10,12 +10,13 @@ Usage:
     --version <ver> \
     --storage-class <lvm-sc> \
     --transfer-dir <dir-on-bastion> \
-    [--keep-export]
+    [--keep-export] [--clean]
 
 Run on the source-cluster bastion (oc login to source cluster).
 Creates a Build Job that exports and compresses VM disks in-cluster.
 Copies only compressed artifacts to --transfer-dir on this bastion.
 Raw disks never land on the bastion.
+Use --transfer-dir /tmp/vm-transfer or $HOME/vm-transfer. Do not use /home/data unless you own it.
 EOF
 }
 
@@ -30,6 +31,7 @@ VERSION=""
 STORAGE_CLASS=""
 TRANSFER_DIR=""
 KEEP_EXPORT="false"
+CLEAN="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --storage-class) STORAGE_CLASS="$2"; shift 2 ;;
     --transfer-dir) TRANSFER_DIR="$2"; shift 2 ;;
     --keep-export) KEEP_EXPORT="true"; shift ;;
+    --clean) CLEAN="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -52,8 +55,14 @@ ensure_logged_in
   exit 2
 }
 
+ensure_writable_dir "${TRANSFER_DIR}"
+
 oc get vm "${VM}" -n "${NS}" >/dev/null
 oc get storageclass "${STORAGE_CLASS}" >/dev/null
+
+if [[ "${CLEAN}" == "true" ]]; then
+  run_cleanup "${NS}"
+fi
 
 SAFE_VM="$(k8s_name "${VM}")"
 SAFE_VERSION="$(k8s_name "${VERSION}")"
@@ -75,9 +84,9 @@ SRC_BYTES="$(compute_source_pvc_bytes "${NS}" "${VM}")"
   exit 1
 }
 OVERHEAD_BYTES="$(quantity_to_bytes "10Gi")"
-PVC_BYTES=$((2 * SRC_BYTES + OVERHEAD_BYTES))
+PVC_BYTES=$((SRC_BYTES + OVERHEAD_BYTES))
 PVC_SIZE="$(bytes_to_gi "${PVC_BYTES}")"
-echo "Job PVC size: ${PVC_SIZE} (2× source PVC sum + 10Gi peak workspace for raw+gzip)"
+echo "Job PVC size: ${PVC_SIZE} (1× source PVC sum + 10Gi workspace)"
 
 JOB_IMAGE="$(resolve_job_image)"
 echo "Job image: ${JOB_IMAGE}"
@@ -115,9 +124,9 @@ fi
 kill "${LOG_PID}" 2>/dev/null || true
 wait "${LOG_PID}" 2>/dev/null || true
 
-mkdir -p "${TRANSFER_DIR}"
+ensure_writable_dir "${TRANSFER_DIR}"
 BUNDLE_LOCAL="${TRANSFER_DIR}/${SAFE_VM}-${VERSION}"
-mkdir -p "${BUNDLE_LOCAL}"
+ensure_writable_dir "${BUNDLE_LOCAL}"
 
 echo "Copying compressed bundle from Job PVC to ${BUNDLE_LOCAL}..."
 copy_pvc_to_local "${NS}" "${PVC_NAME}" "${SA_NAME}" "${JOB_IMAGE}" "${STAGING_POD}" "${BUNDLE_LOCAL}"
