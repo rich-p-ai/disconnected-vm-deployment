@@ -10,7 +10,7 @@ Usage:
     --catalog-namespace <catalog-ns> \
     --namespace <user-project> \
     --vm-name <new-vm> \
-    [--start]
+    [--start] [--clean]
 
 Run on the destination-cluster bastion (oc login to dest cluster).
 One command: seed catalog (if DataSource not Ready) + deploy VM.
@@ -31,6 +31,7 @@ CATALOG_NAMESPACE="vm-catalog"
 TARGET_NAMESPACE=""
 VM_NAME=""
 START_VM="false"
+CLEAN="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --namespace) TARGET_NAMESPACE="$2"; shift 2 ;;
     --vm-name) VM_NAME="$2"; shift 2 ;;
     --start) START_VM="true"; shift ;;
+    --clean) CLEAN="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -75,7 +77,6 @@ ensure_logged_in
 if find "${BUNDLE_PATH}" -maxdepth 1 -name '*.raw' -print -quit | grep -q .; then
   echo "ERROR: Raw disk files found in ${BUNDLE_PATH}." >&2
   echo "Only compressed bundles (*.raw.gz) may be used with pod kickoff." >&2
-  echo "Use the bastion fallback scripts for raw bundles, or re-run kickoff-build.sh." >&2
   exit 1
 fi
 
@@ -93,6 +94,10 @@ source "${BUNDLE_PATH}/release.env"
 oc get storageclass "${STORAGE_CLASS}" >/dev/null
 oc get namespace "${TARGET_NAMESPACE}" >/dev/null
 
+if [[ "${CLEAN}" == "true" ]]; then
+  run_cleanup "${TARGET_NAMESPACE}"
+fi
+
 if oc get vm "${VM_NAME}" -n "${TARGET_NAMESPACE}" >/dev/null 2>&1; then
   echo "ERROR: VM ${TARGET_NAMESPACE}/${VM_NAME} already exists." >&2
   exit 1
@@ -104,7 +109,7 @@ if ! oc get namespace "${CATALOG_NAMESPACE}" >/dev/null 2>&1; then
 fi
 
 SAFE_VM="$(k8s_name "${VM_NAME}")"
-RELEASE_ID="${APP_ID}-${VERSION//[^a-zA-Z0-9-]/-}"
+RELEASE_ID="${APP_ID}-$(k8s_name "${VERSION}")"
 JOB_NAME="abc-dest-${SAFE_VM}-${RELEASE_ID}"
 JOB_NAME="${JOB_NAME:0:63}"
 JOB_NAME="${JOB_NAME%-}"
@@ -171,7 +176,7 @@ echo "Dest kickoff completed."
 echo "VM: ${TARGET_NAMESPACE}/${VM_NAME}"
 if [[ "${START_VM}" != "true" ]]; then
   echo "Start manually with:"
-  echo "  virtctl start vm ${VM_NAME} -n ${TARGET_NAMESPACE}"
+  echo "  virtctl start ${VM_NAME} -n ${TARGET_NAMESPACE}"
 fi
 echo
 echo "Optional cleanup (cluster-admin):"
@@ -179,4 +184,3 @@ echo "  oc delete job ${JOB_NAME} -n ${TARGET_NAMESPACE} --ignore-not-found"
 echo "  oc delete pvc ${PVC_NAME} cm ${CM_NAME} -n ${TARGET_NAMESPACE} --ignore-not-found"
 echo "  oc delete sa ${SA_NAME} role ${SA_NAME} rolebinding ${SA_NAME} -n ${TARGET_NAMESPACE} --ignore-not-found"
 echo "  oc delete role ${SA_NAME}-catalog rolebinding ${SA_NAME}-catalog -n ${CATALOG_NAMESPACE} --ignore-not-found"
-echo "  oc delete clusterrolebinding ${SA_NAME}-catalog-cloner --ignore-not-found"
