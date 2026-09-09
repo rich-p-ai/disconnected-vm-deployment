@@ -1,0 +1,137 @@
+HOW TO COPY A VM (POD WAY)
+Read this. Do the steps in order. Stop if a step fails.
+
+You need the vm-tools folder on the bastion.
+You need to be logged in with oc.
+Do not use sudo.
+
+The disk class name is:  lvm
+(If LVM fails, use lvm. Ask if both fail.)
+
+--------------------------------
+WHAT YOU ARE DOING
+--------------------------------
+1. On the FIRST cluster, you pack the VM into small files.
+2. You copy those files on a USB stick.
+3. On the NEXT cluster, you make a new VM from those files.
+
+The computer in the cluster does the heavy work.
+The bastion only starts the job and holds the small files.
+
+Do not copy any file that ends with .raw
+Only copy files that end with .raw.gz and the paper files with them.
+
+--------------------------------
+BEFORE YOU START
+--------------------------------
+1. Open a terminal.
+2. Go to the vm-tools folder.
+      cd vm-tools
+3. Make the two buttons work.
+      chmod 0750 build dest
+4. Log in.
+      oc login
+5. Check who you are.
+      oc whoami
+   You should be a cluster admin.
+6. Check the disk class.
+      oc get storageclass lvm
+
+--------------------------------
+PART A  PACK THE VM (SOURCE)
+--------------------------------
+Log in to the FIRST cluster.
+
+The VM must be off. If it is on, turn it off first.
+
+Type this. Put in your names.
+
+  ./build \
+    --namespace <project> \
+    --vm <vm-name> \
+    --version 0.1.0 \
+    --storage-class lvm \
+    --transfer-dir /tmp/vm-transfer
+
+Wait. This can take a long time.
+
+GOOD:
+  A folder shows up under /tmp/vm-transfer/
+  It has files that end with .raw.gz
+  It has a file named checksums.sha256
+  It does NOT have files that end with .raw
+
+Check the files:
+
+  cd /tmp/vm-transfer/<vm-name>-0.1.0
+  sha256sum -c checksums.sha256
+
+If that says OK, you are done with Part A.
+
+BAD:
+  Copy the last lines on the screen.
+  Do not run the same command again until the old job is gone.
+  The script prints the delete lines. Use those.
+
+--------------------------------
+PART B  CARRY THE FILES
+--------------------------------
+Copy the whole folder from Part A onto the USB stick.
+
+Also copy the vm-tools folder if the next bastion does not have it.
+
+Walk the stick to the next site.
+
+On the next bastion:
+
+  cd /path/to/<vm-name>-0.1.0
+  sha256sum -c checksums.sha256
+
+If that is not OK, copy the folder again. Do not go on.
+
+--------------------------------
+PART C  MAKE THE VM (DEST)
+--------------------------------
+Log in to the NEXT cluster.
+
+Make the user project if it is not there.
+
+  oc get ns <user-project> || oc new-project <user-project>
+
+Then:
+
+  cd vm-tools
+
+  ./dest \
+    --bundle-path /path/to/<vm-name>-0.1.0 \
+    --storage-class lvm \
+    --catalog-namespace vm-catalog \
+    --namespace <user-project> \
+    --vm-name <new-vm-name>
+
+Do not add --start the first time.
+The new VM should stay off until you check it.
+
+Wait. This can take a long time.
+
+GOOD:
+  The job finishes.
+  This works:
+      oc get vm <new-vm-name> -n <user-project>
+
+Words about clone fail and image-upload are OK on lvm.
+
+--------------------------------
+TURN THE VM ON (ONLY IF TOLD)
+--------------------------------
+  virtctl start vm <new-vm-name> -n <user-project>
+  oc get vmi <new-vm-name> -n <user-project>
+
+--------------------------------
+RULES
+--------------------------------
+- Do not use sudo.
+- Do not copy .raw files.
+- Do not start a huge VM on the first try if you can use a small test VM.
+- If a run fails, delete the old job first. The script prints how.
+- Ask for help if oc whoami fails or storageclass lvm is missing.

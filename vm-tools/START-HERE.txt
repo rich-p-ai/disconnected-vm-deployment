@@ -1,20 +1,21 @@
-VM TOOLS
-This folder is the whole toolkit. Copy only this folder to the bastion.
-Edit files in this folder. Do not hunt through the rest of the repo.
+START HERE
 
-Storage class: LVM
-Need: oc login as cluster-admin, then chmod 0750 build dest
+1. Read HOW-TO.txt in this same folder.
+2. Do Part A on the first cluster.
+3. Copy the small files on a USB stick. No .raw files.
+4. Do Part C on the next cluster.
 
-SOURCE (logged into source cluster)
-  ./build --namespace <project> --vm <vm> --version 0.1.0-test --storage-class LVM --transfer-dir /tmp/vm-transfer
+You need:
+  - this vm-tools folder
+  - oc login as cluster admin
+  - disk class named lvm
 
-USB
-  Copy /tmp/vm-transfer/<vm>-0.1.0-test/  (*.raw.gz only, no *.raw)
-  On dest: cd that dir && sha256sum -c checksums.sha256
+Do not use sudo.
 
-DEST (logged into dest cluster)
-  oc get ns <user-project> || oc new-project <user-project>
-  ./dest --bundle-path /path/to/<vm>-0.1.0-test --storage-class LVM --catalog-namespace vm-catalog --namespace <user-project> --vm-name <new-vm>
+Quick commands (put in your names):
 
-Leave off --start unless told to power the VM on.
-Clone failure then image-upload is normal on LVM.
+  chmod 0750 build dest
+
+  ./build --namespace <project> --vm <vm> --version 0.1.0 --storage-class lvm --transfer-dir /tmp/vm-transfer
+
+  ./dest --bundle-path /path/to/<vm>-0.1.0 --storage-class lvm --catalog-namespace vm-catalog --namespace <user-project> --vm-name <new-vm>
