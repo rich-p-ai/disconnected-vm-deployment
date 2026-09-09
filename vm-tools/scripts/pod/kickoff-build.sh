@@ -16,7 +16,7 @@ Run on the source-cluster bastion (oc login to source cluster).
 Creates a Build Job that exports and compresses VM disks in-cluster.
 Then a transfer Job holds the work PVC while files copy to --transfer-dir.
 Raw disks never land on the bastion.
-Work PVC is capped at 150Gi (root-disk workspace).
+Work PVC is capped at 300Gi (root-disk workspace).
 Use --transfer-dir /tmp/vm-transfer or $HOME/vm-transfer. Do not use /home/data unless you own it.
 EOF
 }
@@ -33,7 +33,7 @@ STORAGE_CLASS=""
 TRANSFER_DIR=""
 KEEP_EXPORT="false"
 CLEAN="false"
-MAX_WORK_PVC="150Gi"
+MAX_WORK_PVC="300Gi"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
