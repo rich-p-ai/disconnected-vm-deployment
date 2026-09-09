@@ -4,7 +4,7 @@
 
 require_kickoff_commands() {
   local command
-  for command in bash oc awk cut grep sed mktemp du find zstd; do
+  for command in bash oc awk cut grep sed mktemp du find gzip; do
     command -v "${command}" >/dev/null 2>&1 || {
       echo "ERROR: Required command is missing: ${command}" >&2
       exit 127
@@ -261,22 +261,22 @@ stage_virtctl_on_pvc() {
     echo "ERROR: virtctl could not be resolved on the bastion or from a cluster pod." >&2
     exit 1
   }
-  echo "Staging virtctl and zstd onto PVC via pod ${staging_pod}..."
+  echo "Staging virtctl onto PVC via pod ${staging_pod}..."
   apply_staging_pod "${ns}" "${pvc}" "${sa}" "${image}" "${staging_pod}"
   oc exec "${staging_pod}" -n "${ns}" -- mkdir -p /work/bin
   oc cp "${virtctl_path}" "${ns}/${staging_pod}:/work/bin/virtctl"
   oc exec "${staging_pod}" -n "${ns}" -- chmod 0755 /work/bin/virtctl
   local zstd_path
   zstd_path="$(command -v zstd || true)"
-  if [[ -z "${zstd_path}" ]]; then
-    echo "ERROR: zstd is not installed on this bastion. Install it with: sudo dnf install -y zstd" >&2
-    delete_staging_pod "${ns}" "${staging_pod}"
-    exit 1
+  if [[ -n "${zstd_path}" ]]; then
+    oc cp "${zstd_path}" "${ns}/${staging_pod}:/work/bin/zstd"
+    oc exec "${staging_pod}" -n "${ns}" -- chmod 0755 /work/bin/zstd
+    echo "zstd staged at /work/bin/zstd (optional)"
+  else
+    echo "zstd not on this bastion; Jobs will use gzip (RHEL/OpenShift default)."
   fi
-  oc cp "${zstd_path}" "${ns}/${staging_pod}:/work/bin/zstd"
-  oc exec "${staging_pod}" -n "${ns}" -- chmod 0755 /work/bin/zstd
   delete_staging_pod "${ns}" "${staging_pod}"
-  echo "virtctl and zstd staged at /work/bin on PVC ${pvc}"
+  echo "virtctl staged at /work/bin/virtctl on PVC ${pvc}"
 }
 
 delete_staging_pod() {
