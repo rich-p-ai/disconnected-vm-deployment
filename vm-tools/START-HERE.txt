@@ -14,7 +14,9 @@ Do not use sudo.
 
 Quick commands (put in your names):
 
-  chmod 0750 build dest
+  chmod 0750 build dest cleanup
+
+  ./cleanup
 
   ./build --namespace <project> --vm <vm> --version 0.1.0 --storage-class lvm --transfer-dir /tmp/vm-transfer
 

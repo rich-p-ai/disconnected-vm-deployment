@@ -27,8 +27,8 @@ BEFORE YOU START
 1. Open a terminal.
 2. Go to the vm-tools folder.
       cd vm-tools
-3. Make the two buttons work.
-      chmod 0750 build dest
+3. Make the buttons work.
+      chmod 0750 build dest cleanup
 4. Log in.
       oc login
 5. Check who you are.
@@ -36,6 +36,28 @@ BEFORE YOU START
    You should be a cluster admin.
 6. Check the disk class.
       oc get storageclass lvm
+7. Clean old jobs first.
+      ./cleanup
+
+--------------------------------
+CLEAN OLD JOBS
+--------------------------------
+If a build failed, or you are not sure, run this first.
+
+  ./cleanup
+
+That looks in the whole cluster for old abc-build and abc-dest jobs.
+It deletes those jobs and their work disks.
+It does NOT delete your VMs.
+It does NOT delete vm-catalog.
+
+One project only:
+
+  ./cleanup --namespace vms
+
+One job only:
+
+  ./cleanup --namespace vms --job abc-build-windows-0.1.0-test
 
 --------------------------------
 PART A  PACK THE VM (SOURCE)
@@ -43,6 +65,8 @@ PART A  PACK THE VM (SOURCE)
 Log in to the FIRST cluster.
 
 The VM must be off. If it is on, turn it off first.
+
+  virtctl stop <vm-name> -n <project>
 
 Type this. Put in your names.
 
@@ -70,37 +94,31 @@ If that says OK, you are done with Part A.
 
 BAD:
   Copy the last lines on the screen.
-  Do not run the same command again until the old job is gone.
-  The script prints the delete lines. Use those.
+  Run ./cleanup
+  Do not run ./build again until cleanup is done.
 
 --------------------------------
 PART B  CARRY THE FILES
 --------------------------------
 Copy the whole folder from Part A onto the USB stick.
 
-Also copy the vm-tools folder if the next bastion does not have it.
+Only copy the folder that has .raw.gz files.
+Do not copy .raw files.
 
-Walk the stick to the next site.
-
-On the next bastion:
-
-  cd /path/to/<vm-name>-0.1.0
-  sha256sum -c checksums.sha256
-
-If that is not OK, copy the folder again. Do not go on.
+Take the USB to the next site.
 
 --------------------------------
 PART C  MAKE THE VM (DEST)
 --------------------------------
 Log in to the NEXT cluster.
 
-Make the user project if it is not there.
+  chmod 0750 build dest cleanup
+  oc login
+  oc whoami
+  oc get storageclass lvm
+  ./cleanup
 
-  oc get ns <user-project> || oc new-project <user-project>
-
-Then:
-
-  cd vm-tools
+Put the USB folder on the bastion. Then:
 
   ./dest \
     --bundle-path /path/to/<vm-name>-0.1.0 \
@@ -109,29 +127,18 @@ Then:
     --namespace <user-project> \
     --vm-name <new-vm-name>
 
-Do not add --start the first time.
-The new VM should stay off until you check it.
-
 Wait. This can take a long time.
 
 GOOD:
-  The job finishes.
-  This works:
-      oc get vm <new-vm-name> -n <user-project>
+  oc get vm <new-vm-name> -n <user-project>
+  The VM is there and stopped.
 
-Words about clone fail and image-upload are OK on lvm.
+Start it only after you look at it:
 
---------------------------------
-TURN THE VM ON (ONLY IF TOLD)
---------------------------------
-  virtctl start vm <new-vm-name> -n <user-project>
+  virtctl start <new-vm-name> -n <user-project>
   oc get vmi <new-vm-name> -n <user-project>
 
---------------------------------
-RULES
---------------------------------
-- Do not use sudo.
-- Do not copy .raw files.
-- Do not start a huge VM on the first try if you can use a small test VM.
-- If a run fails, delete the old job first. The script prints how.
-- Ask for help if oc whoami fails or storageclass lvm is missing.
+BAD:
+  Copy the last lines on the screen.
+  Run ./cleanup
+  Do not run ./dest again until cleanup is done.
