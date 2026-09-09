@@ -4,7 +4,7 @@
 
 require_kickoff_commands() {
   local command
-  for command in bash oc awk cut grep sed mktemp du find; do
+  for command in bash oc awk cut grep sed mktemp du find zstd; do
     command -v "${command}" >/dev/null 2>&1 || {
       echo "ERROR: Required command is missing: ${command}" >&2
       exit 127
@@ -167,6 +167,70 @@ stream_job_logs() {
   echo "WARNING: Job pod not ready for log streaming yet; continuing to wait." >&2
 }
 
+apply_staging_pod() {
+  local ns="$1" pvc="$2" sa="$3" image="$4" staging_pod="$5"
+  oc delete pod "${staging_pod}" -n "${ns}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${staging_pod}
+  namespace: ${ns}
+spec:
+  restartPolicy: Never
+  serviceAccountName: ${sa}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    fsGroup: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: stage
+      image: ${image}
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        runAsUser: 1001
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      persistentVolumeClaim:
+        claimName: ${pvc}
+EOF
+  local i
+  for i in $(seq 1 60); do
+    if oc get pod "${staging_pod}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; then
+      break
+    fi
+    sleep 2
+  done
+}
+
+ensure_writable_dir() {
+  local dir="$1"
+  if ! mkdir -p "${dir}" 2>/dev/null; then
+    echo "ERROR: This bastion account cannot create ${dir}." >&2
+    echo "Do not use /home/data unless you own it." >&2
+    echo "Use a folder you can write, for example:" >&2
+    echo "  --transfer-dir /tmp/vm-transfer" >&2
+    echo "  --transfer-dir ${HOME}/vm-transfer" >&2
+    exit 1
+  fi
+  if [[ ! -w "${dir}" ]]; then
+    echo "ERROR: ${dir} exists but is not writable by $(id -un)." >&2
+    echo "Use --transfer-dir /tmp/vm-transfer" >&2
+    exit 1
+  fi
+}
+
 stage_virtctl_on_pvc() {
   local ns="$1" pvc="$2" sa="$3" image="$4" staging_pod="$5"
   local script_dir repo_root virtctl_path tmpdir
@@ -197,41 +261,22 @@ stage_virtctl_on_pvc() {
     echo "ERROR: virtctl could not be resolved on the bastion or from a cluster pod." >&2
     exit 1
   }
-  echo "Staging virtctl onto PVC via pod ${staging_pod}..."
-  oc delete pod "${staging_pod}" -n "${ns}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-  cat <<EOF | oc apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${staging_pod}
-  namespace: ${ns}
-spec:
-  restartPolicy: Never
-  serviceAccountName: ${sa}
-  containers:
-    - name: stage
-      image: ${image}
-      command: ["sleep", "3600"]
-      volumeMounts:
-        - name: work
-          mountPath: /work
-  volumes:
-    - name: work
-      persistentVolumeClaim:
-        claimName: ${pvc}
-EOF
-  local i
-  for i in $(seq 1 60); do
-    if oc get pod "${staging_pod}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; then
-      break
-    fi
-    sleep 2
-  done
+  echo "Staging virtctl and zstd onto PVC via pod ${staging_pod}..."
+  apply_staging_pod "${ns}" "${pvc}" "${sa}" "${image}" "${staging_pod}"
   oc exec "${staging_pod}" -n "${ns}" -- mkdir -p /work/bin
   oc cp "${virtctl_path}" "${ns}/${staging_pod}:/work/bin/virtctl"
   oc exec "${staging_pod}" -n "${ns}" -- chmod 0755 /work/bin/virtctl
+  local zstd_path
+  zstd_path="$(command -v zstd || true)"
+  if [[ -z "${zstd_path}" ]]; then
+    echo "ERROR: zstd is not installed on this bastion. Install it with: sudo dnf install -y zstd" >&2
+    delete_staging_pod "${ns}" "${staging_pod}"
+    exit 1
+  fi
+  oc cp "${zstd_path}" "${ns}/${staging_pod}:/work/bin/zstd"
+  oc exec "${staging_pod}" -n "${ns}" -- chmod 0755 /work/bin/zstd
   delete_staging_pod "${ns}" "${staging_pod}"
-  echo "virtctl staged at /work/bin/virtctl on PVC ${pvc}"
+  echo "virtctl and zstd staged at /work/bin on PVC ${pvc}"
 }
 
 delete_staging_pod() {
@@ -269,36 +314,8 @@ create_configmap_from_script() {
 
 copy_pvc_to_local() {
   local ns="$1" pvc="$2" sa="$3" image="$4" staging_pod="$5" local_dir="$6"
-  mkdir -p "${local_dir}"
-  oc delete pod "${staging_pod}" -n "${ns}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-  cat <<EOF | oc apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${staging_pod}
-  namespace: ${ns}
-spec:
-  restartPolicy: Never
-  serviceAccountName: ${sa}
-  containers:
-    - name: stage
-      image: ${image}
-      command: ["sleep", "3600"]
-      volumeMounts:
-        - name: work
-          mountPath: /work
-  volumes:
-    - name: work
-      persistentVolumeClaim:
-        claimName: ${pvc}
-EOF
-  local i
-  for i in $(seq 1 60); do
-    if oc get pod "${staging_pod}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; then
-      break
-    fi
-    sleep 2
-  done
+  ensure_writable_dir "${local_dir}"
+  apply_staging_pod "${ns}" "${pvc}" "${sa}" "${image}" "${staging_pod}"
   local remote_list base
   remote_list="$(oc exec "${staging_pod}" -n "${ns}" -- sh -c 'ls -1 /work/bundle 2>/dev/null' || true)"
   [[ -n "${remote_list}" ]] || { echo "ERROR: No files found in /work/bundle on Job PVC." >&2; exit 1; }
@@ -319,35 +336,7 @@ copy_local_to_pvc() {
     echo "ERROR: Refusing to copy raw disk files from ${local_dir}." >&2
     exit 1
   fi
-  oc delete pod "${staging_pod}" -n "${ns}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-  cat <<EOF | oc apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${staging_pod}
-  namespace: ${ns}
-spec:
-  restartPolicy: Never
-  serviceAccountName: ${sa}
-  containers:
-    - name: stage
-      image: ${image}
-      command: ["sleep", "3600"]
-      volumeMounts:
-        - name: work
-          mountPath: /work
-  volumes:
-    - name: work
-      persistentVolumeClaim:
-        claimName: ${pvc}
-EOF
-  local i
-  for i in $(seq 1 60); do
-    if oc get pod "${staging_pod}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; then
-      break
-    fi
-    sleep 2
-  done
+  apply_staging_pod "${ns}" "${pvc}" "${sa}" "${image}" "${staging_pod}"
   oc exec "${staging_pod}" -n "${ns}" -- mkdir -p /work/bundle
   local f base
   for f in "${local_dir}"/*; do
