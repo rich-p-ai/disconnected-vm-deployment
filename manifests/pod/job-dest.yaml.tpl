@@ -17,11 +17,25 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: __SA_NAME__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: seed-deploy
           image: __JOB_IMAGE__
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "/scripts/job-seed-deploy.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1001
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: TARGET_NAMESPACE
               value: "__TARGET_NS__"
