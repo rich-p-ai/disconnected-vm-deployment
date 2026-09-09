@@ -57,7 +57,7 @@ One project only:
 
 One job only:
 
-  ./cleanup --namespace vms --job abc-build-windows-0.1.0-test
+  ./cleanup --namespace vms --job abc-build-windows-0-1-0-test
 
 --------------------------------
 PART A  PACK THE VM (SOURCE)
@@ -75,7 +75,8 @@ Type this. Put in your names.
     --vm <vm-name> \
     --version 0.1.0 \
     --storage-class lvm \
-    --transfer-dir /tmp/vm-transfer
+    --transfer-dir /tmp/vm-transfer \
+    --clean
 
 Wait. This can take a long time.
 
@@ -125,7 +126,8 @@ Put the USB folder on the bastion. Then:
     --storage-class lvm \
     --catalog-namespace vm-catalog \
     --namespace <user-project> \
-    --vm-name <new-vm-name>
+    --vm-name <new-vm-name> \
+    --clean
 
 Wait. This can take a long time.
 
