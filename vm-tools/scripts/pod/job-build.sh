@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Build Job: download disk, compress with zstd -10, ship .raw.zst.
+# Build Job: download disk, compress with zstd -5, ship .raw.zst.
 
 WORK_DIR="${WORK_DIR:-/work}"
 BUNDLE="${WORK_DIR}/bundle"
@@ -130,30 +130,32 @@ vmexport_download() {
 
 zstd_compress() {
   local src="$1" dest="$2"
-  echo "Compressing with zstd -10 -> ${dest}"
-  zstd -10 -T0 -f -o "${dest}" "${src}"
+  echo "Compressing with zstd -5 -T0 -> ${dest}"
+  zstd -5 -T0 -f -o "${dest}" "${src}"
   ls -lh "${dest}"
 }
 
 download_export_disk() {
   local export_vol="$1" output_zst="$2" formats="$3"
-  local tmp_raw="${BUNDLE}/.tmp-download.raw"
-  rm -f "${tmp_raw}" "${output_zst}"
-  if has_format "${formats}" raw; then
-    echo "Downloading raw export ${export_vol} (will zstd on source)..."
-    vmexport_download "${export_vol}" "${tmp_raw}" raw
-  elif has_format "${formats}" gzip; then
+  rm -f "${output_zst}"
+  if has_format "${formats}" gzip; then
     local tmp_gz="${BUNDLE}/.tmp-download.raw.gz"
-    echo "Downloading gzip export ${export_vol}, then zstd..."
+    echo "Downloading gzip export ${export_vol}, streaming into zstd (no raw on PVC)..."
     vmexport_download "${export_vol}" "${tmp_gz}" gzip
-    gzip -dc "${tmp_gz}" > "${tmp_raw}"
+    gzip -dc "${tmp_gz}" | zstd -5 -T0 -f -o "${output_zst}"
     rm -f "${tmp_gz}"
-  else
-    return 1
+    ls -lh "${output_zst}"
+    return 0
   fi
-  zstd_compress "${tmp_raw}" "${output_zst}"
-  rm -f "${tmp_raw}"
-  return 0
+  if has_format "${formats}" raw; then
+    local tmp_raw="${BUNDLE}/.tmp-download.raw"
+    echo "Downloading raw export ${export_vol}, then zstd..."
+    vmexport_download "${export_vol}" "${tmp_raw}" raw
+    zstd_compress "${tmp_raw}" "${output_zst}"
+    rm -f "${tmp_raw}"
+    return 0
+  fi
+  return 1
 }
 
 download_filesystem_and_compress() {
