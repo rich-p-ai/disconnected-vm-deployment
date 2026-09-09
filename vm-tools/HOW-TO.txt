@@ -5,8 +5,8 @@ You need the vm-tools folder on the bastion.
 You need to be logged in with oc.
 Do not use sudo for the build itself.
 
-gzip is enough. It comes with RHEL and with the OpenShift cli image.
-zstd is optional. Do not install it unless your site gives you an RPM.
+gzip is already on RHEL and in the OpenShift CLI image.
+Do not install zstd.
 
 The disk class name is:  lvm
 (Ask if oc get storageclass lvm fails.)
@@ -22,7 +22,7 @@ The computer in the cluster does the heavy work.
 The bastion only starts the job and holds the small files.
 
 Do not copy any file that ends with .raw
-Copy .raw.gz or .raw.zst and the paper files with them.
+Only copy files that end with .raw.gz and the paper files with them.
 
 --------------------------------
 BEFORE YOU START
@@ -81,7 +81,7 @@ Wait. This can take a long time.
 
 GOOD:
   A folder shows up under /tmp/vm-transfer/
-  It has files that end with .raw.gz (or .raw.zst if zstd is present)
+  It has files that end with .raw.gz
   It has a file named checksums.sha256
   It does NOT have files that end with .raw
 
@@ -102,7 +102,7 @@ PART B  CARRY THE FILES
 --------------------------------
 Copy the whole folder from Part A onto the USB stick.
 
-Only copy the folder that has .raw.gz or .raw.zst files.
+Only copy the folder that has .raw.gz files.
 Do not copy .raw files.
 
 Take the USB to the next site.

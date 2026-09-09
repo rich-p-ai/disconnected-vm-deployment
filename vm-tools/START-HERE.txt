@@ -1,18 +1,18 @@
 START HERE
 
 1. Read HOW-TO.txt in this same folder.
-2. gzip is enough. zstd is optional. Do not install extra packages.
-3. Do Part A on the first cluster.
-4. Copy the small .raw.gz (or .raw.zst) files on a USB stick. No .raw files.
-5. Do Part C on the next cluster.
+2. Do Part A on the first cluster.
+3. Copy the small .raw.gz files on a USB stick. No .raw files.
+4. Do Part C on the next cluster.
 
 You need:
   - this vm-tools folder
   - oc login as cluster admin
   - disk class named lvm
 
+gzip is already on RHEL and in the OpenShift CLI image. Do not install zstd.
+
 Do not use sudo for ./build or ./dest.
-Use --transfer-dir /tmp/vm-transfer. Do not use /home/data.
 
 Quick commands (put in your names):
 
