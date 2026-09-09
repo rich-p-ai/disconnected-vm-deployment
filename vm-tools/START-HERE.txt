@@ -1,21 +1,23 @@
 START HERE
 
 1. Read HOW-TO.txt in this same folder.
-2. Do Part A on the first cluster.
-3. Copy the small files on a USB stick. No .raw files.
-4. Do Part C on the next cluster.
+2. Install zstd on the bastion if needed:  sudo dnf install -y zstd
+3. Do Part A on the first cluster.
+4. Copy the small .raw.zst files on a USB stick. No .raw files.
+5. Do Part C on the next cluster.
 
 You need:
   - this vm-tools folder
   - oc login as cluster admin
+  - zstd on the bastion
   - disk class named lvm
 
-Do not use sudo.
+Do not use sudo for ./build or ./dest.
 
 Quick commands (put in your names):
 
   chmod 0750 build dest cleanup
-
+  command -v zstd
   ./cleanup
 
   ./build --namespace <project> --vm <vm> --version 0.1.0 --storage-class lvm --transfer-dir /tmp/vm-transfer --clean

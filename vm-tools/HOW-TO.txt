@@ -3,7 +3,8 @@ Read this. Do the steps in order. Stop if a step fails.
 
 You need the vm-tools folder on the bastion.
 You need to be logged in with oc.
-Do not use sudo.
+You need zstd on the bastion (sudo dnf install -y zstd).
+Do not use sudo for the build itself.
 
 The disk class name is:  lvm
 (Ask if oc get storageclass lvm fails.)
@@ -19,7 +20,7 @@ The computer in the cluster does the heavy work.
 The bastion only starts the job and holds the small files.
 
 Do not copy any file that ends with .raw
-Only copy files that end with .raw.gz and the paper files with them.
+Only copy files that end with .raw.zst and the paper files with them.
 
 --------------------------------
 BEFORE YOU START
@@ -36,7 +37,9 @@ BEFORE YOU START
    You should be a cluster admin.
 6. Check the disk class.
       oc get storageclass lvm
-7. Clean old jobs first.
+7. Check zstd.
+      command -v zstd
+8. Clean old jobs first.
       ./cleanup
 
 --------------------------------
@@ -54,10 +57,6 @@ It does NOT delete vm-catalog.
 One project only:
 
   ./cleanup --namespace vms
-
-One job only:
-
-  ./cleanup --namespace vms --job abc-build-windows-0-1-0-test
 
 --------------------------------
 PART A  PACK THE VM (SOURCE)
@@ -82,7 +81,7 @@ Wait. This can take a long time.
 
 GOOD:
   A folder shows up under /tmp/vm-transfer/
-  It has files that end with .raw.gz
+  It has files that end with .raw.zst
   It has a file named checksums.sha256
   It does NOT have files that end with .raw
 
@@ -103,7 +102,7 @@ PART B  CARRY THE FILES
 --------------------------------
 Copy the whole folder from Part A onto the USB stick.
 
-Only copy the folder that has .raw.gz files.
+Only copy the folder that has .raw.zst files.
 Do not copy .raw files.
 
 Take the USB to the next site.
@@ -117,6 +116,7 @@ Log in to the NEXT cluster.
   oc login
   oc whoami
   oc get storageclass lvm
+  command -v zstd
   ./cleanup
 
 Put the USB folder on the bastion. Then:
