@@ -16,6 +16,7 @@ Run on the source-cluster bastion (oc login to source cluster).
 Creates a Build Job that exports and compresses VM disks in-cluster.
 Then a transfer Job holds the work PVC while files copy to --transfer-dir.
 Raw disks never land on the bastion.
+Work PVC is capped at 150Gi (root-disk workspace).
 Use --transfer-dir /tmp/vm-transfer or $HOME/vm-transfer. Do not use /home/data unless you own it.
 EOF
 }
@@ -32,6 +33,7 @@ STORAGE_CLASS=""
 TRANSFER_DIR=""
 KEEP_EXPORT="false"
 CLEAN="false"
+MAX_WORK_PVC="150Gi"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -85,8 +87,14 @@ SRC_BYTES="$(compute_source_pvc_bytes "${NS}" "${VM}")"
 }
 OVERHEAD_BYTES="$(quantity_to_bytes "10Gi")"
 PVC_BYTES=$((SRC_BYTES + OVERHEAD_BYTES))
+CAP_BYTES="$(quantity_to_bytes "${MAX_WORK_PVC}")"
+if (( PVC_BYTES > CAP_BYTES )); then
+  echo "WARNING: computed work PVC $(bytes_to_gi "${PVC_BYTES}") exceeds ${MAX_WORK_PVC} root-disk cap."
+  echo "WARNING: using ${MAX_WORK_PVC}. Huge data/NAS volumes are not copied onto the work PVC."
+  PVC_BYTES="${CAP_BYTES}"
+fi
 PVC_SIZE="$(bytes_to_gi "${PVC_BYTES}")"
-echo "Job PVC size: ${PVC_SIZE} (1× source PVC sum + 10Gi workspace)"
+echo "Job PVC size: ${PVC_SIZE} (capped at ${MAX_WORK_PVC})"
 
 JOB_IMAGE="$(resolve_job_image)"
 echo "Job image: ${JOB_IMAGE}"
