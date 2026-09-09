@@ -6,7 +6,8 @@ Copy a VM from a source OpenShift Virtualization cluster to a disconnected clust
 
 Folder: **[vm-tools/](vm-tools/)**  
 Tech sheet: **[vm-tools/START-HERE.txt](vm-tools/START-HERE.txt)**  
-Operator guide: **[docs/pod-operator-guide.md](docs/pod-operator-guide.md)**
+Operator guide: **[docs/pod-operator-guide.md](docs/pod-operator-guide.md)**  
+Developer guide: **[docs/developer-guide.md](docs/developer-guide.md)**
 
 Storage class on these clusters: **`lvm`**
 
