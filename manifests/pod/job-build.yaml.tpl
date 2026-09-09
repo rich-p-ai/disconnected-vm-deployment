@@ -19,8 +19,6 @@ spec:
       serviceAccountName: __SA_NAME__
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1001
-        fsGroup: 1001
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -31,7 +29,6 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
-            runAsUser: 1001
             capabilities:
               drop: ["ALL"]
             seccompProfile:
