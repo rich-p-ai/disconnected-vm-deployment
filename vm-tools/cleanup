@@ -1,66 +1,83 @@
 #!/usr/bin/env bash
-# Delete leftover build/dest Job objects. Does not delete VMs or vm-catalog disks.
+# Delete leftover abc-build / abc-dest Jobs anywhere in the cluster.
+# Does not delete VMs or vm-catalog disks.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./cleanup --namespace <project> [--job <job-name>]
-  ./cleanup --namespace <project> --all
+  ./cleanup
+  ./cleanup --namespace <project>
+  ./cleanup --namespace <project> --job <job-name>
 
-Examples:
-  ./cleanup --namespace vms --job abc-build-windows-0.1.0-test
-  ./cleanup --namespace vms --all
+With no flags: find every abc-build-* and abc-dest-* Job in the cluster and delete it.
+With --namespace: only that project.
+With --job: only that Job name (needs --namespace).
 
 Deletes Job, work PVC, ConfigMap, ServiceAccount, Role, RoleBinding,
-and staging pods for that job. Does not delete user VMs or vm-catalog.
+and staging pods. Does not delete user VMs or vm-catalog.
 EOF
 }
 
 NS=""
 JOB=""
-ALL="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --namespace) NS="${2:-}"; shift 2 ;;
     --job) JOB="${2:-}"; shift 2 ;;
-    --all) ALL="true"; shift ;;
+    --all) shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-[[ -n "${NS}" ]] || { echo "ERROR: --namespace is required" >&2; usage; exit 1; }
 oc whoami >/dev/null || { echo "ERROR: oc login first" >&2; exit 1; }
 
 clean_one() {
-  local job="$1"
-  echo "Cleaning ${NS}/${job}"
-  oc delete job "${job}" -n "${NS}" --ignore-not-found
-  oc delete pvc "${job}-work" -n "${NS}" --ignore-not-found
-  oc delete cm "${job}-scripts" -n "${NS}" --ignore-not-found
-  oc delete sa "${job}" -n "${NS}" --ignore-not-found
-  oc delete role "${job}" rolebinding "${job}" -n "${NS}" --ignore-not-found
-  oc delete pod "${job}-stage" -n "${NS}" --ignore-not-found
-  oc delete role "${job}-catalog" rolebinding "${job}-catalog" -n "${NS}" --ignore-not-found 2>/dev/null || true
+  local ns="$1" job="$2"
+  echo "Cleaning ${ns}/${job}"
+  oc delete job "${job}" -n "${ns}" --ignore-not-found
+  oc delete pvc "${job}-work" -n "${ns}" --ignore-not-found
+  oc delete cm "${job}-scripts" -n "${ns}" --ignore-not-found
+  oc delete sa "${job}" -n "${ns}" --ignore-not-found
+  oc delete role "${job}" rolebinding "${job}" -n "${ns}" --ignore-not-found
+  oc delete pod "${job}-stage" -n "${ns}" --ignore-not-found
+  oc delete role "${job}-catalog" rolebinding "${job}-catalog" -n "${ns}" --ignore-not-found 2>/dev/null || true
 }
 
-if [[ "${ALL}" == "true" ]]; then
+if [[ -n "${JOB}" ]]; then
+  [[ -n "${NS}" ]] || { echo "ERROR: --job needs --namespace" >&2; exit 1; }
+  clean_one "${NS}" "${JOB}"
+  echo "Done. VMs and vm-catalog were not deleted."
+  exit 0
+fi
+
+if [[ -n "${NS}" ]]; then
   mapfile -t jobs < <(oc get jobs -n "${NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E '^abc-(build|dest)-' || true)
   if [[ ${#jobs[@]} -eq 0 ]]; then
     echo "No abc-build / abc-dest Jobs in ${NS}."
     exit 0
   fi
   for j in "${jobs[@]}"; do
-    clean_one "${j}"
+    clean_one "${NS}" "${j}"
   done
-elif [[ -n "${JOB}" ]]; then
-  clean_one "${JOB}"
-else
-  echo "ERROR: pass --job <name> or --all" >&2
-  usage
-  exit 1
+  echo "Done. VMs and vm-catalog were not deleted."
+  exit 0
 fi
+
+echo "Looking for abc-build / abc-dest Jobs in the whole cluster..."
+mapfile -t rows < <(oc get jobs -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E $'\tabc-(build|dest)-' || true)
+
+if [[ ${#rows[@]} -eq 0 ]]; then
+  echo "No leftover build/dest Jobs found."
+  exit 0
+fi
+
+for row in "${rows[@]}"; do
+  ns="${row%%$'\t'*}"
+  job="${row#*$'\t'}"
+  clean_one "${ns}" "${job}"
+done
 
 echo "Done. VMs and vm-catalog were not deleted."
