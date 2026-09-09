@@ -1,7 +1,7 @@
 VM TOOLS — disconnected OpenShift VM copy
 Read this first. Do the steps in order. Do not improvise.
 
-Storage class on these clusters is:  LVM
+Storage class on these clusters is:  lvm
 You must be logged in with oc (cluster-admin) before you run anything.
 
 ------------------------------------------------
@@ -14,11 +14,10 @@ Dest cluster:  one command seeds the catalog (if needed) and creates the VM.
 ------------------------------------------------
 ON THE BASTION (first time)
 ------------------------------------------------
-  tar -xzf vm-tools-1.0.0.tar.gz
   cd vm-tools
   chmod 0750 build dest
   oc whoami
-  oc get storageclass LVM
+  oc get storageclass lvm
 
 ------------------------------------------------
 1. SOURCE CLUSTER — BUILD
@@ -29,7 +28,7 @@ Log in to the SOURCE cluster.
     --namespace <source-project> \
     --vm <source-vm-name> \
     --version 0.1.0-test \
-    --storage-class LVM \
+    --storage-class lvm \
     --transfer-dir /tmp/vm-transfer
 
 Wait until it prints checksums and USB instructions.
@@ -67,7 +66,7 @@ Log in to the DEST cluster.
 
   ./dest \
     --bundle-path /path/to/<vm>-0.1.0-test \
-    --storage-class LVM \
+    --storage-class lvm \
     --catalog-namespace vm-catalog \
     --namespace <user-project> \
     --vm-name <new-vm-name>
@@ -79,7 +78,7 @@ PASS:
   oc get vm <new-vm-name> -n <user-project>
   VM is Stopped unless you used --start
 
-A message about clone failing and falling back to image-upload is normal on LVM.
+A message about clone failing and falling back to image-upload is normal on lvm.
 
 ------------------------------------------------
 4. IF SOMETHING FAILS

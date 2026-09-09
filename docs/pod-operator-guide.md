@@ -4,7 +4,7 @@ Copy a VM from a source OpenShift Virtualization cluster to a disconnected clust
 
 **Toolkit folder:** [`vm-tools/`](../vm-tools/). Copy that folder to each bastion. Techs start at [`vm-tools/START-HERE.txt`](../vm-tools/START-HERE.txt).
 
-Storage class on these clusters is **`LVM`** (OpenShift LVMS, local RWO). Pass that name exactly. It is not an external LVM array.
+Storage class on these clusters is **`lvm`** (OpenShift LVMS, local RWO). Pass that name exactly. It is not an external array.
 
 NAS/NFS is not supported in this release.
 
@@ -27,7 +27,7 @@ gzip on a Job PVC               metadata              Create VM in user project
 
 `./dest` is one command: seed catalog if the DataSource is not Ready, then create the VM. Default VM state is stopped.
 
-On `LVM`, CDI clone usually fails. The Job then gunzips one disk at a time and uses `virtctl image-upload` into the user project. That fallback is expected.
+On `lvm`, CDI clone usually fails. The Job then gunzips one disk at a time and uses `virtctl image-upload` into the user project. That fallback is expected.
 
 ---
 
@@ -37,7 +37,7 @@ On `LVM`, CDI clone usually fails. The Job then gunzips one disk at a time and u
 - `virtctl` on the bastion, or CNV so kickoff can stage it
 - OpenShift Virtualization on source; Virtualization + CDI on dest
 - Source VM: PVC-backed disks, can be stopped
-- StorageClass `LVM` exists (`oc get storageclass LVM`)
+- StorageClass `lvm` exists (`oc get storageclass lvm`)
 - First test: one small disk (20–40Gi), not a production image
 
 ---
@@ -48,13 +48,13 @@ On `LVM`, CDI clone usually fails. The Job then gunzips one disk at a time and u
 cd vm-tools
 chmod 0750 build dest
 oc whoami
-oc get storageclass LVM
+oc get storageclass lvm
 
 ./build \
   --namespace <source-project> \
   --vm <source-vm> \
   --version 0.1.0-test \
-  --storage-class LVM \
+  --storage-class lvm \
   --transfer-dir /tmp/vm-transfer
 ```
 
@@ -64,7 +64,7 @@ oc get storageclass LVM
 
 Work PVC size is `2 ×` source PVC sum `+ 10Gi` so gzip has room.
 
-On `LVM` the staging pod and Job must land on the same node. If the Job is Pending, check PVC node and pod events.
+On `lvm` the staging pod and Job must land on the same node. If the Job is Pending, check PVC node and pod events.
 
 ---
 
@@ -103,7 +103,7 @@ oc get ns <user-project> || oc new-project <user-project>
 
 ./dest \
   --bundle-path /path/to/<vm>-0.1.0-test \
-  --storage-class LVM \
+  --storage-class lvm \
   --catalog-namespace vm-catalog \
   --namespace <user-project> \
   --vm-name <new-vm>

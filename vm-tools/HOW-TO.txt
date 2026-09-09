@@ -6,7 +6,7 @@ You need to be logged in with oc.
 Do not use sudo.
 
 The disk class name is:  lvm
-(If LVM fails, use lvm. Ask if both fail.)
+(Ask if oc get storageclass lvm fails.)
 
 --------------------------------
 WHAT YOU ARE DOING
