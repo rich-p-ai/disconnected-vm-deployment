@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Runs inside the source-cluster Build Job. Exports VM disks, compresses to gzip,
-# writes bundle metadata. Never leaves uncompressed raw on the Job PVC.
+# Runs inside the source-cluster Build Job. Prefers the export gzip stream so
+# the source never unpacks. Only gunzip on dest. Raw+gzip fallback if needed.
 
 WORK_DIR="${WORK_DIR:-/work}"
 BUNDLE="${WORK_DIR}/bundle"
@@ -132,39 +132,48 @@ refresh_export_info() {
   fi
 }
 
-download_and_compress_raw() {
-  local export_vol="$1" output_gz="$2"
-  local tmp_raw="${BUNDLE}/.tmp-download.raw"
-  local pf_args=()
-
-  rm -f "${tmp_raw}" "${output_gz}"
-
+vmexport_download() {
+  local export_vol="$1" output="$2" fmt="$3"
+  rm -f "${output}"
   if virtctl vmexport download "${EXPORT_NAME}" \
       --namespace="${NS}" \
       --volume="${export_vol}" \
-      --output="${tmp_raw}" \
-      --format=raw \
+      --output="${output}" \
+      --format="${fmt}" \
       --keep-vme \
       --insecure \
-      --readiness-timeout=30m 2>/dev/null; then
-    :
-  else
-    echo "In-cluster download failed; retrying with port-forward..."
-    pf_args=(--port-forward)
-    virtctl vmexport download "${EXPORT_NAME}" \
-      --namespace="${NS}" \
-      --volume="${export_vol}" \
-      --output="${tmp_raw}" \
-      --format=raw \
-      --keep-vme \
-      --insecure \
-      --readiness-timeout=30m \
-      "${pf_args[@]}"
+      --readiness-timeout=30m; then
+    return 0
   fi
+  echo "In-cluster download failed; retrying with port-forward..."
+  virtctl vmexport download "${EXPORT_NAME}" \
+    --namespace="${NS}" \
+    --volume="${export_vol}" \
+    --output="${output}" \
+    --format="${fmt}" \
+    --keep-vme \
+    --insecure \
+    --port-forward \
+    --readiness-timeout=30m
+}
 
-  echo "Compressing ${export_vol} -> ${output_gz}..."
-  gzip -c "${tmp_raw}" > "${output_gz}"
-  rm -f "${tmp_raw}"
+download_export_disk() {
+  local export_vol="$1" output_gz="$2" formats="$3"
+  if has_format "${formats}" gzip; then
+    echo "Downloading gzip export ${export_vol} -> ${output_gz} (no unpack on source)"
+    vmexport_download "${export_vol}" "${output_gz}" gzip
+    return 0
+  fi
+  if has_format "${formats}" raw; then
+    local tmp_raw="${BUNDLE}/.tmp-download.raw"
+    echo "Export has raw only; downloading then gzip on source..."
+    vmexport_download "${export_vol}" "${tmp_raw}" raw
+    echo "Compressing ${export_vol} -> ${output_gz}..."
+    gzip -c "${tmp_raw}" > "${output_gz}"
+    rm -f "${tmp_raw}"
+    return 0
+  fi
+  return 1
 }
 
 download_filesystem_and_compress() {
@@ -320,8 +329,8 @@ EOF
     OUTPUT_GZ="${BUNDLE}/${FILE_NAME}"
     echo "Exporting ${DOWNLOAD_VOLUME} [${FORMATS}] -> ${FILE_NAME}"
 
-    if has_format "${FORMATS}" raw || has_format "${FORMATS}" gzip; then
-      download_and_compress_raw "${DOWNLOAD_VOLUME}" "${OUTPUT_GZ}"
+    if has_format "${FORMATS}" gzip || has_format "${FORMATS}" raw; then
+      download_export_disk "${DOWNLOAD_VOLUME}" "${OUTPUT_GZ}" "${FORMATS}"
     else
       download_filesystem_and_compress "${DOWNLOAD_VOLUME}" "${OUTPUT_GZ}"
     fi
