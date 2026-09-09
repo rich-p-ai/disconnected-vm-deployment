@@ -14,7 +14,7 @@ Usage:
 
 Run on the source-cluster bastion (oc login to source cluster).
 Creates a Build Job that exports and compresses VM disks in-cluster.
-Copies only compressed artifacts to --transfer-dir on this bastion.
+Then a transfer Job holds the work PVC while files copy to --transfer-dir.
 Raw disks never land on the bastion.
 Use --transfer-dir /tmp/vm-transfer or $HOME/vm-transfer. Do not use /home/data unless you own it.
 EOF
@@ -128,7 +128,9 @@ ensure_writable_dir "${TRANSFER_DIR}"
 BUNDLE_LOCAL="${TRANSFER_DIR}/${SAFE_VM}-${VERSION}"
 ensure_writable_dir "${BUNDLE_LOCAL}"
 
-echo "Copying compressed bundle from Job PVC to ${BUNDLE_LOCAL}..."
+echo "Build Job is Complete. Starting transfer Job and copying bundle to ${BUNDLE_LOCAL}..."
+echo "If this copy dies, rerun:"
+echo "  ./fetch --namespace ${NS} --pvc ${PVC_NAME} --transfer-dir ${TRANSFER_DIR} --bundle-name ${SAFE_VM}-${VERSION}"
 copy_pvc_to_local "${NS}" "${PVC_NAME}" "${SA_NAME}" "${JOB_IMAGE}" "${STAGING_POD}" "${BUNDLE_LOCAL}"
 
 echo
@@ -147,5 +149,4 @@ print_usb_instructions "${BUNDLE_LOCAL}"
 echo "Build kickoff completed: ${BUNDLE_LOCAL}"
 echo
 echo "Optional cleanup (cluster-admin):"
-echo "  oc delete job ${JOB_NAME} -n ${NS} --ignore-not-found"
-echo "  oc delete pvc ${PVC_NAME} cm ${CM_NAME} sa ${SA_NAME} role ${SA_NAME} rolebinding ${SA_NAME} -n ${NS} --ignore-not-found"
+echo "  ./cleanup --namespace ${NS}"
