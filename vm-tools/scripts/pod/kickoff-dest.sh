@@ -14,7 +14,7 @@ Usage:
 
 Run on the destination-cluster bastion (oc login to dest cluster).
 One command: seed catalog (if DataSource not Ready) + deploy VM.
-Only compressed archives are copied from the bastion; raw disks never land here.
+Only compressed archives (*.raw.zst) are copied from the bastion; raw disks never land here.
 Default: VM created stopped unless --start.
 Fails hard if --vm-name already exists in --namespace.
 EOF
@@ -76,15 +76,16 @@ ensure_logged_in
 
 if find "${BUNDLE_PATH}" -maxdepth 1 -name '*.raw' -print -quit | grep -q .; then
   echo "ERROR: Raw disk files found in ${BUNDLE_PATH}." >&2
-  echo "Only compressed bundles (*.raw.gz) may be used with pod kickoff." >&2
+  echo "Only compressed bundles (*.raw.zst or *.raw.gz) may be used with pod kickoff." >&2
   exit 1
 fi
 
 shopt -s nullglob
+zst_files=("${BUNDLE_PATH}"/*.raw.zst)
 gz_files=("${BUNDLE_PATH}"/*.raw.gz)
 shopt -u nullglob
-if [[ ${#gz_files[@]} -eq 0 ]]; then
-  echo "ERROR: No *.raw.gz compressed disks found in ${BUNDLE_PATH}." >&2
+if [[ ${#zst_files[@]} -eq 0 && ${#gz_files[@]} -eq 0 ]]; then
+  echo "ERROR: No *.raw.zst or *.raw.gz compressed disks found in ${BUNDLE_PATH}." >&2
   exit 1
 fi
 
