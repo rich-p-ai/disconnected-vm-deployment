@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Delete leftover abc-build / abc-dest Jobs anywhere in the cluster.
+# Delete leftover abc-build / abc-dest / abc-xfer Jobs anywhere in the cluster.
 # Does not delete VMs or vm-catalog disks.
 set -euo pipefail
 
@@ -10,7 +10,7 @@ Usage:
   ./cleanup --namespace <project>
   ./cleanup --namespace <project> --job <job-name>
 
-With no flags: find every abc-build-* and abc-dest-* Job in the cluster and delete it.
+With no flags: find every abc-build-*, abc-dest-*, abc-xfer-* Job and delete it.
 With --namespace: only that project.
 With --job: only that Job name (needs --namespace).
 
@@ -54,9 +54,9 @@ if [[ -n "${JOB}" ]]; then
 fi
 
 if [[ -n "${NS}" ]]; then
-  mapfile -t jobs < <(oc get jobs -n "${NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E '^abc-(build|dest)-' || true)
+  mapfile -t jobs < <(oc get jobs -n "${NS}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E '^abc-(build|dest|xfer)-' || true)
   if [[ ${#jobs[@]} -eq 0 ]]; then
-    echo "No abc-build / abc-dest Jobs in ${NS}."
+    echo "No abc-build / abc-dest / abc-xfer Jobs in ${NS}."
     exit 0
   fi
   for j in "${jobs[@]}"; do
@@ -66,11 +66,11 @@ if [[ -n "${NS}" ]]; then
   exit 0
 fi
 
-echo "Looking for abc-build / abc-dest Jobs in the whole cluster..."
-mapfile -t rows < <(oc get jobs -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E $'\tabc-(build|dest)-' || true)
+echo "Looking for abc-build / abc-dest / abc-xfer Jobs in the whole cluster..."
+mapfile -t rows < <(oc get jobs -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E $'\tabc-(build|dest|xfer)-' || true)
 
 if [[ ${#rows[@]} -eq 0 ]]; then
-  echo "No leftover build/dest Jobs found."
+  echo "No leftover build/dest/xfer Jobs found."
   exit 0
 fi
 
