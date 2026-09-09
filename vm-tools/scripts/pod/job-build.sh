@@ -139,7 +139,6 @@ download_and_compress_raw() {
 
   rm -f "${tmp_raw}" "${output_gz}"
 
-  # Try in-cluster (no port-forward) first.
   if virtctl vmexport download "${EXPORT_NAME}" \
       --namespace="${NS}" \
       --volume="${export_vol}" \
@@ -217,7 +216,7 @@ main() {
 
   if oc get vmi "${VM}" -n "${NS}" >/dev/null 2>&1; then
     echo "Stopping VM ${NS}/${VM}..."
-    virtctl stop vm "${VM}" -n "${NS}"
+    virtctl stop "${VM}" -n "${NS}"
     echo "Waiting for VMI termination..."
     while oc get vmi "${VM}" -n "${NS}" >/dev/null 2>&1; do
       sleep 5
