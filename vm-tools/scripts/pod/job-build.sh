@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Build Job: download disk, compress with zstd -5, ship .raw.zst.
+# Build Job: download disk, compress with gzip -9, ship .raw.gz.
+# gzip is on RHEL / openshift/cli. No zstd.
 
 WORK_DIR="${WORK_DIR:-/work}"
 BUNDLE="${WORK_DIR}/bundle"
@@ -11,7 +12,7 @@ export PATH
 
 require_job_commands() {
   local command missing=()
-  for command in bash oc awk cut grep sed sha256sum find sort mkdir date tar gzip zstd virtctl; do
+  for command in bash oc awk cut grep sed sha256sum find sort mkdir date tar gzip virtctl; do
     command -v "${command}" >/dev/null 2>&1 || missing+=("${command}")
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
@@ -128,48 +129,58 @@ vmexport_download() {
   virtctl vmexport download "${EXPORT_NAME}" --namespace="${NS}" --volume="${export_vol}" --output="${output}" --format="${fmt}" --keep-vme --insecure --port-forward --readiness-timeout=30m
 }
 
-zstd_compress() {
+gzip9_compress() {
   local src="$1" dest="$2"
-  echo "Compressing with zstd -5 -T0 -> ${dest}"
-  zstd -5 -T0 -f -o "${dest}" "${src}"
+  echo "Compressing with gzip -9 -> ${dest}"
+  gzip -9 -c "${src}" > "${dest}"
   ls -lh "${dest}"
 }
 
+assert_gzip() {
+  local f="$1"
+  local magic
+  magic="$(od -An -tx1 -N2 "${f}" | tr -d ' \n')"
+  if [[ "${magic}" != "1f8b" ]]; then
+    echo "ERROR: ${f} is not a gzip file (magic=${magic})." >&2
+    exit 1
+  fi
+}
+
 download_export_disk() {
-  local export_vol="$1" output_zst="$2" formats="$3"
-  rm -f "${output_zst}"
-  if has_format "${formats}" gzip; then
-    local tmp_gz="${BUNDLE}/.tmp-download.raw.gz"
-    echo "Downloading gzip export ${export_vol}, streaming into zstd (no raw on PVC)..."
-    vmexport_download "${export_vol}" "${tmp_gz}" gzip
-    gzip -dc "${tmp_gz}" | zstd -5 -T0 -f -o "${output_zst}"
-    rm -f "${tmp_gz}"
-    ls -lh "${output_zst}"
-    return 0
-  fi
+  local export_vol="$1" output_gz="$2" formats="$3"
+  local tmp_raw="${BUNDLE}/.tmp-download.raw"
+  rm -f "${tmp_raw}" "${output_gz}"
   if has_format "${formats}" raw; then
-    local tmp_raw="${BUNDLE}/.tmp-download.raw"
-    echo "Downloading raw export ${export_vol}, then zstd..."
+    echo "Downloading raw export ${export_vol} (will gzip -9 on source)..."
     vmexport_download "${export_vol}" "${tmp_raw}" raw
-    zstd_compress "${tmp_raw}" "${output_zst}"
-    rm -f "${tmp_raw}"
-    return 0
+  elif has_format "${formats}" gzip; then
+    local tmp_gz="${BUNDLE}/.tmp-download.raw.gz"
+    echo "Downloading gzip export ${export_vol}, then recompress gzip -9..."
+    vmexport_download "${export_vol}" "${tmp_gz}" gzip
+    gzip -dc "${tmp_gz}" > "${tmp_raw}"
+    rm -f "${tmp_gz}"
+  else
+    return 1
   fi
-  return 1
+  gzip9_compress "${tmp_raw}" "${output_gz}"
+  rm -f "${tmp_raw}"
+  assert_gzip "${output_gz}"
+  return 0
 }
 
 download_filesystem_and_compress() {
-  local export_vol="$1" output_zst="$2"
+  local export_vol="$1" output_gz="$2"
   local archive="${BUNDLE}/.tmp-${export_vol}.tar.gz"
   local tmp_raw="${BUNDLE}/.tmp-extract.raw"
-  rm -f "${archive}" "${tmp_raw}" "${output_zst}"
+  rm -f "${archive}" "${tmp_raw}" "${output_gz}"
   if ! virtctl vmexport download "${EXPORT_NAME}" --namespace="${NS}" --volume="${export_vol}" --output="${archive}" --keep-vme --insecure --readiness-timeout=30m 2>/dev/null; then
     virtctl vmexport download "${EXPORT_NAME}" --namespace="${NS}" --volume="${export_vol}" --output="${archive}" --keep-vme --insecure --port-forward --readiness-timeout=30m
   fi
   extract_disk_from_archive "${archive}" "${tmp_raw}"
   rm -f "${archive}"
-  zstd_compress "${tmp_raw}" "${output_zst}"
+  gzip9_compress "${tmp_raw}" "${output_gz}"
   rm -f "${tmp_raw}"
+  assert_gzip "${output_gz}"
 }
 
 main() {
@@ -215,7 +226,7 @@ main() {
     VOLUME_MODE="$(oc get pvc "${PVC_NAME}" -n "${NS}" -o jsonpath='{.spec.volumeMode}')"
     [[ -n "${VOLUME_MODE}" ]] || VOLUME_MODE="Filesystem"
     if [[ "${VOLUME_NAME}" == "${BOOT_VOLUME}" ]]; then ROLE="boot"; else ROLE="data"; fi
-    FILE_NAME="${VOLUME_NAME}.raw.zst"
+    FILE_NAME="${VOLUME_NAME}.raw.gz"
     printf '%s\t%s\t%s\t%s\t%s\n' "${ROLE}" "${VOLUME_NAME}" "${FILE_NAME}" "${PVC_SIZE}" "${VOLUME_MODE}" >> "${BUNDLE}/disks.tsv"
   done < "${BUNDLE}/source-disks.tsv"
   cat > "${BUNDLE}/release.env" <<EOF
@@ -251,21 +262,21 @@ EOF
     DOWNLOAD_VOLUME="$(pick_export_volume "${VOLUME_NAME}" "${CLAIM_NAME}" "${EXPORT_INFO}" || true)"
     [[ -n "${DOWNLOAD_VOLUME}" ]] || { echo "ERROR: Could not map volume ${VOLUME_NAME}." >&2; exit 1; }
     FORMATS="$(export_formats_for "${DOWNLOAD_VOLUME}" "${EXPORT_INFO}" || true)"
-    OUTPUT_ZST="${BUNDLE}/${FILE_NAME}"
+    OUTPUT_GZ="${BUNDLE}/${FILE_NAME}"
     echo "Exporting ${DOWNLOAD_VOLUME} [${FORMATS}] -> ${FILE_NAME}"
     if has_format "${FORMATS}" gzip || has_format "${FORMATS}" raw; then
-      download_export_disk "${DOWNLOAD_VOLUME}" "${OUTPUT_ZST}" "${FORMATS}"
+      download_export_disk "${DOWNLOAD_VOLUME}" "${OUTPUT_GZ}" "${FORMATS}"
     else
-      download_filesystem_and_compress "${DOWNLOAD_VOLUME}" "${OUTPUT_ZST}"
+      download_filesystem_and_compress "${DOWNLOAD_VOLUME}" "${OUTPUT_GZ}"
     fi
   done < "${BUNDLE}/disks.tsv"
   rm -f "${BUNDLE}/export-volumes.tsv" "${BUNDLE}/.tmp-"* "${BUNDLE}/.extract-"* 2>/dev/null || true
   (
     cd "${BUNDLE}"
     shopt -s nullglob
-    files=(*.raw.zst)
+    files=(*.raw.gz)
     shopt -u nullglob
-    [[ ${#files[@]} -gt 0 ]] || { echo "ERROR: No .raw.zst files produced." >&2; exit 1; }
+    [[ ${#files[@]} -gt 0 ]] || { echo "ERROR: No .raw.gz files produced." >&2; exit 1; }
     sha256sum "${files[@]}" > checksums.sha256
   )
   if [[ "${KEEP_EXPORT}" != "true" ]]; then
