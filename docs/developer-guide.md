@@ -16,8 +16,9 @@ Constraints that drive every design choice:
 - Dest has **no Internet**.
 - Bastion disks are small. Raw Windows/RHEL images do **not** belong on the bastion.
 - We **cannot ship a custom container image**. Jobs reuse in-cluster `openshift/cli`.
-- Extra binaries must already exist on RHEL / OpenShift, or we stage them from the cluster. That is why compression is **gzip -9**, not zstd.
-- Storage class on these sites is **`lvm`** (LVMS, local RWO). CDI clone across namespaces usually fails. Image-upload fallback is expected, not an error.
+- Extra binaries must already exist on RHEL / OpenShift, or we stage them from the cluster. Compression is **gzip -9**, not zstd.
+- Storage class on these sites is **`lvm`** (LVMS / TopoLVM, local RWO). CDI clone across namespaces usually fails. Image-upload fallback is expected, not an error.
+- Some guests (TrueNAS-backed volumes) advertise multi-petabyte PVC requests. The **work PVC is capped at 300Gi**. Do not remove that cap.
 
 If a change violates one of those, it is the wrong change.
 
@@ -25,23 +26,29 @@ If a change violates one of those, it is the wrong change.
 
 ## 2. Mental model
 
-Two machines, two logins, one USB stick.
+Two machines, two logins, one USB stick. **One `./build` command, two Jobs.**
 
 ```
-bastion (source)                 cluster (source)              USB                 cluster (dest)              bastion (dest)
-----------------                 ----------------              ---                 --------------              ---------------
-./build                          Job + work PVC                                 Job + work PVC                ./dest
-  create SA/RBAC/PVC/CM            stop VM                                        seed vm-catalog
-  stage virtctl onto PVC           virtctl vmexport                               image-upload or clone
-  start Job                        gzip -9 one disk at a time                     create VM
-  copy *.raw.gz off PVC            write bundle on PVC
+bastion (source)              cluster (source)                 USB            cluster (dest)
+----------------              ----------------                 ---            --------------
+./build                       Job A abc-build-*                               ./dest
+  SA / RBAC / work PVC          stop VM, vmexport, gzip -9
+  stage virtctl                 write /work/bundle on work PVC
+  start Job A
+  wait Job A Complete
+  start Job B abc-*-xfer        Job B sleeps on same work PVC
+  oc cp + sha256 verify         (holds RWO so bastion can pull)
+./fetch                         retry of the copy only
 ```
 
-**Bastion scripts do orchestration only.** They apply YAML and copy small files. They never decompress a guest disk.
+Job A Complete in the console is **not** “files are on the bastion.”
+Done means checksums verified under `--transfer-dir`.
 
-**Job scripts do the heavy I/O.** They run inside a pod, on a work PVC that is large enough for one raw disk plus the compressed set.
+**Bastion scripts orchestrate.** They apply YAML and `oc cp`. They never decompress a guest disk.
 
-If you mix those roles (decompress on the bastion, or invent a new image), you will break the air-gap sites.
+**Job A does the heavy I/O.** Job B only keeps the PVC mounted.
+
+A second cluster Job cannot write to the bastion disk. Transfer is always pull-from-PVC on the bastion (`oc cp` with retries).
 
 ---
 
@@ -51,17 +58,20 @@ The package techs copy is **`vm-tools/`**. That folder must stay self-contained.
 
 ```
 vm-tools/
-  START-HERE.txt          tech entry
-  HOW-TO.txt              tech procedure
-  build                   wrapper → scripts/pod/kickoff-build.sh
-  dest                    wrapper → scripts/pod/kickoff-dest.sh
-  cleanup                 cluster-wide leftover Job cleanup
+  START-HERE.txt
+  HOW-TO.txt
+  build                   → scripts/pod/kickoff-build.sh
+  dest                    → scripts/pod/kickoff-dest.sh
+  fetch                   → scripts/pod/kickoff-fetch.sh
+  cleanup
+  docs/developer-guide.md
   scripts/pod/
-    lib-kickoff.sh        shared bastion helpers
-    kickoff-build.sh      source orchestrator
-    kickoff-dest.sh       dest orchestrator
-    job-build.sh          runs IN the source Job
-    job-seed-deploy.sh    runs IN the dest Job
+    lib-kickoff.sh
+    kickoff-build.sh
+    kickoff-fetch.sh
+    kickoff-dest.sh
+    job-build.sh
+    job-seed-deploy.sh
   scripts/lib/oc-virtctl.sh
   manifests/pod/
     job-build.yaml.tpl
@@ -70,41 +80,31 @@ vm-tools/
     rbac-job-dest.yaml.tpl
 ```
 
-There is a second copy under repo-root `scripts/pod/` and `manifests/pod/`.
-**If you edit one, edit the other.** Kickoff resolves templates relative to the folder the wrapper lives in (`vm-tools/` when techs run `./build`).
+If a second copy exists under repo-root `scripts/pod/` or `manifests/pod/`, **edit both**.
 
-Legacy bastion path (raw disks on the bastion) is `scripts/build-abc-vm-package.sh`, `seed-abc-vm-catalog.sh`, `deploy-abc-vm.sh`. Do not delete it. Do not make the pod path depend on it.
+Legacy bastion path stays. Do not delete it. Do not make the pod path depend on it.
 
 ---
 
 ## 4. Object graph a kickoff creates
 
-Every run creates a short-lived set named after the Job:
+| Object | Build | Transfer | Dest |
+| --- | --- | --- | --- |
+| ServiceAccount | Job namespace | same SA as build | user project |
+| Role + RoleBinding | Job namespace | reused | user project **and** `vm-catalog` |
+| Work PVC (`<build-job>-work`) | RWO on `lvm`, **max 300Gi** | same PVC | RWO on `lvm` |
+| ConfigMap (`<job>-scripts`) | `job-build.sh` | none | `job-seed-deploy.sh` |
+| Staging pod (`<job>-stage`) | virtctl onto PVC | — | virtctl + bundle onto PVC |
+| Job A `abc-build-*` | export + gzip | — | — |
+| Job B `abc-xfer-*` (or `abc-build-*-xfer`) | — | sleep 4h on work PVC | — |
+| Job `abc-dest-*` | — | — | seed + deploy |
 
-| Object | Build | Dest |
-| --- | --- | --- |
-| ServiceAccount | Job namespace | user project |
-| Role + RoleBinding | Job namespace | user project **and** `vm-catalog` |
-| ClusterRole `abc-vm-catalog-cloner` + binding | no | yes (CDI clone grant) |
-| Work PVC (`<job>-work`) | RWO on `lvm` | RWO on `lvm` |
-| ConfigMap (`<job>-scripts`) | `job-build.sh` | `job-seed-deploy.sh` |
-| Staging pod (`<job>-stage`) | copies virtctl onto PVC | copies virtctl + bundle onto PVC |
-| Job | runs `job-build.sh` | runs `job-seed-deploy.sh` |
+`cleanup` matches `^abc-(build|dest|xfer)-`. If you rename the prefix, update cleanup.
 
-Labels: `abcvm.io/component=pod-job-build|pod-job-dest`, `abcvm.io/job=<name>`.
+Do **not** run `./cleanup` until `sha256sum -c checksums.sha256` is OK on the bastion. Cleanup deletes the work PVC and the bundle on it.
 
-Job names are DNS-safe: lowercase, dots become dashes, max 63 chars.
-
-```
-abc-build-<vm>-<version>
-abc-dest-<vm>-<appid>-<version>
-```
-
-`cleanup` finds `^abc-(build|dest)-`. If you rename the prefix, update cleanup or leftovers stay forever.
-
-Jobs use `backoffLimit: 0` and `restartPolicy: Never`. A failed Job does not retry. Clean it, then rerun.
-
-`ttlSecondsAfterFinished: 86400` is a backstop. Do not rely on it. Techs should `./cleanup` after a run.
+Jobs use `backoffLimit: 0` and `restartPolicy: Never`.
+`ttlSecondsAfterFinished: 86400` is a backstop only.
 
 ---
 
@@ -113,134 +113,95 @@ Jobs use `backoffLimit: 0` and `restartPolicy: Never`. A failed Job does not ret
 ### 5.1 Bastion (`kickoff-build.sh`)
 
 1. Confirm `oc` login, VM exists, StorageClass exists.
-2. Optional `--clean` deletes leftover Jobs in that namespace.
-3. Size the work PVC: **sum of source PVC requests + 10Gi**.
-4. Resolve Job image (`openshift/cli:latest` in-cluster, then CNV images).
-5. Apply RBAC template.
-6. Create work PVC, wait Bound.
-7. Stage `virtctl` onto `/work/bin` via a short-lived pod that mounts the PVC.
-8. Put `job-build.sh` in a ConfigMap.
-9. Apply Job, stream logs, wait Complete (24h).
-10. Copy **only** the bundle off the PVC into `--transfer-dir/<vm>-<version>/`.
-11. Refuse to write `--transfer-dir` if the account cannot create it (`/home/data` is the usual trap).
+2. Optional `--clean` deletes leftover Jobs in that namespace. Skip `--clean` if another work PVC still holds a bundle you have not copied.
+3. Compute work PVC: `sum(source PVC requests) + 10Gi`, then **cap at 300Gi** (`MAX_WORK_PVC`).
+4. Resolve Job image (`openshift/cli:latest`, then CNV images).
+5. Apply RBAC. Create work PVC. Wait Bound.
+6. Stage `virtctl` onto `/work/bin`.
+7. ConfigMap with `job-build.sh`. Start **Job A**. Stream logs. Wait Complete (24h).
+8. Release RWO attach (delete Job A pods still holding the volume).
+9. Start **Job B** (transfer helper, `sleep 14400`) on the same PVC.
+10. `oc cp` each `/work/bundle/*` file with retries. Refuse `*.raw`.
+11. `sha256sum -c checksums.sha256`. Only then print success.
+12. Leave the PVC. Operator runs `./cleanup` after USB copy.
 
-`--transfer-dir` must be writable by the bastion user. Prefer `/tmp/vm-transfer` or `$HOME/vm-transfer`.
+If step 10–11 dies, **do not rebuild**. Run:
 
-### 5.2 Job (`job-build.sh`)
+```bash
+./fetch --namespace <ns> --pvc <job>-work --transfer-dir <dir> --bundle-name <vm>-<version>
+```
 
-1. Require: `bash oc awk gzip virtctl sha256sum` (no zstd).
-2. Stop the VM if a VMI exists. Syntax is `virtctl stop <name> -n <ns>` — **no `vm` token**. Wrong syntax is a known outage.
-3. Dump `source-vm.yaml`, `source-pvcs.yaml`, `source-disks.tsv`.
-4. Pick boot volume by name heuristics (`root`, `boot`, `os`, `c-drive`, …). First disk if nothing matches.
-5. Write `disks.tsv` and `release.env`. File names are `<volume>.raw.gz`.
-6. Create `VirtualMachineExport`, wait Ready.
-7. For each disk:
-   - Prefer raw export, then `gzip -9`.
-   - If export only offers gzip, gunzip and recompress at `-9`.
-   - Delete the raw temp file before the next disk.
-   - Assert gzip magic `1f 8b`.
-8. `sha256sum *.raw.gz > checksums.sha256`.
-9. Delete the export unless `KEEP_EXPORT=true`.
+`--transfer-dir` must be writable. Prefer `/tmp/vm-transfer` or `$HOME/vm-transfer`. Never `/home/data` unless the account owns it.
 
-One-disk lifecycle is mandatory on `lvm`. If you keep every raw plus every gz on the PVC, the Job fills the volume and dies.
+Changing the cap: one line in `kickoff-build.sh`, `MAX_WORK_PVC="300Gi"`. Recreate the Job and PVC; you cannot grow a bound LVMS claim in this pipeline.
+
+### 5.2 Job A (`job-build.sh`)
+
+Unchanged contract: stop VM (`virtctl stop <name> -n <ns>`, no `vm` token), export, gzip -9 one disk at a time, write bundle, delete export.
+
+If the guest has a multi-TB data volume, Job A may still try to export it and fill the 300Gi cap. Prefer guests whose **root** disk gzip fits in 300Gi. Do not raise the cap to match a bogus TrueNAS request (we have seen `2181337249Gi`).
+
+### 5.3 Job B + `./fetch`
+
+Job B does not copy to the bastion. It holds the volume.
+
+`copy_pvc_to_local` in `lib-kickoff.sh`:
+
+- `release_rwo_attach` — delete pods still using the work PVC
+- `start_xfer_job` — Job + sleep
+- `oc_cp_retry` — up to 8 tries per file
+- checksum verify
+
+`lvm` is RWO. If Job A’s pod is still around, Job B stays Pending. That is why we delete the completed build pods before transfer.
 
 ---
 
 ## 6. Dest path — what `./dest` does
 
-One command: seed catalog if needed, then create the VM.
-
-### 6.1 Bastion (`kickoff-dest.sh`)
-
-1. Require bundle files: `release.env`, `disks.tsv`, `checksums.sha256`, at least one `*.raw.gz`.
-2. **Reject `*.raw`.** If a tech copied the raw disks, fail hard.
-3. Source `release.env` for `APP_ID` / `VERSION`.
-4. Fail if `--vm-name` already exists.
-5. Create `vm-catalog` namespace if missing.
-6. Size work PVC: **bundle bytes + largest disk + 10Gi** (room to gunzip one disk).
-7. Apply dest RBAC (user ns + catalog Role + ClusterRoleBinding).
-8. Copy the bundle onto the PVC. Stage virtctl.
-9. Start Job. Wait up to 48h.
-
-### 6.2 Job (`job-seed-deploy.sh`)
-
-**Seed (`vm-catalog`)** — skipped when DataSource `<release-id>` is already Ready:
-
-- For each row in `disks.tsv`: gunzip one file, `virtctl image-upload dv`, delete the raw, wait DV Succeeded.
-- Create/update DataSource pointing at the boot DV.
-
-**Deploy (user project):**
-
-- Try CDI clone from catalog DataSource / catalog PVC.
-- On `lvm` this usually fails. That is normal.
-- Fallback: gunzip that one disk, `virtctl image-upload` into the user project, delete raw.
-- Apply a **minimal** VirtualMachine spec (4 CPU / 8Gi unless you change `release.env` defaults, virtio or volumeMode-aware disk, default pod network).
-- Start only if `START_VM=true`. Default is stopped.
-
-Do not treat “clone failed, falling back to image-upload” as a regression.
+Unchanged: seed `vm-catalog` if needed, clone-or-upload, minimal VM. Reject `*.raw`. Gunzip one disk at a time.
 
 ---
 
 ## 7. Bundle contract
 
-This is the API between source and dest. Change it in both Jobs in the same commit.
-
 ```
 <vm>-<version>/
-  release.env           shell-sourceable key=value
-  disks.tsv             role<TAB>volume_name<TAB>file<TAB>pvc_size<TAB>volume_mode
-  checksums.sha256      sha256 of every *.raw.gz
-  source-vm.yaml        debug only
-  source-pvcs.yaml      debug only
-  source-disks.tsv      debug only
-  <volume>.raw.gz       gzip -9 of raw disk
+  release.env
+  disks.tsv
+  checksums.sha256
+  source-vm.yaml
+  source-pvcs.yaml
+  source-disks.tsv
+  <volume>.raw.gz
 ```
 
-`release.env` fields dest depends on:
-
-- `APP_NAME`, `APP_ID`, `VERSION`
-- `SOURCE_NAMESPACE`, `SOURCE_VM`
-- `CATALOG_NAMESPACE` (default `vm-catalog`)
-- `VM_CPU_CORES`, `VM_MEMORY`, `VM_NETWORK_MODE`
-
-`disks.tsv` role `boot` becomes catalog DV `<release-id>-boot` and DataSource name `<release-id>`.
-Data disks become `<release-id>-<sanitized-volume>`.
-
-Never put uncompressed `.raw` in the transfer directory.
+Never put uncompressed `.raw` in the transfer directory. Dest rejects `.raw.zst`.
 
 ---
 
-## 8. RBAC — why each rule exists
+## 8. RBAC
 
-Kickoff runs as cluster-admin. The **Job pod** does not. It uses the generated SA.
+Unchanged. Build Role must include `virtualmachines/stop` and `start` subresources.
 
-**Build Role** must include:
-
-- `kubevirt.io` VM/VMI get/list/watch/patch
-- `subresources.kubevirt.io` `virtualmachines/stop` and `start` — without this, `virtctl stop` returns Forbidden or a confusing client error
-- `export.kubevirt.io` VirtualMachineExports CRUD
-- pods, PVCs, secrets, services, `pods/portforward` (vmexport download fallback)
-
-**Dest Role (user project)** must include DataVolumes, DataSources, PVCs, pods, `uploadtokenrequests`.
-
-**Dest Role in `vm-catalog`** is the same set so seed can upload goldens.
-
-**ClusterRole `abc-vm-catalog-cloner`** grants `datavolumes/source`. Needed for CDI clone. Harmless if clone is unused.
-
-If you add a new `oc` / `virtctl` call in a Job script, add the verb **before** you test. Restricted PodSecurity warnings are noisy; real Forbidden is a stop-the-line bug.
+Transfer Job reuses the build SA. It only needs to mount the PVC and run `sleep`. Do not invent a second Role unless you drop the shared SA.
 
 ---
 
-## 9. Storage and scheduling
+## 9. Storage and sizing
 
-`lvm` is RWO and node-local.
+`lvm` is RWO and node-local. Staging pod, Job A, and Job B must follow the PVC.
 
-- Staging pod and Job must land on the **same node** as the work PVC.
-- If the Job is Pending: `oc describe pvc`, `oc describe pod`, look for FailedScheduling / WaitForFirstConsumer.
-- Do not switch the work PVC to RWX. These clusters do not have it for this class.
-- Do not raise build PVC to “2× all disks + all gz” unless a site has the capacity. Current formula is 1× source sum + 10Gi because we delete raw after each gzip.
+**Work PVC formula (build):**
 
-`quantity_to_bytes` must accept bare integer bytes (some PVCs have no unit). If you “simplify” that function, dest PVC sizing breaks.
+```
+min( sum(source PVC requests) + 10Gi,  300Gi )
+```
+
+TrueNAS / CSI guests often advertise nonsense request values. The cap is mandatory. A Pending work PVC with `ResourceExhausted` and a request in the millions of Gi is the uncapped sizer — not an empty cluster.
+
+`quantity_to_bytes` must accept bare integer bytes. Do not “simplify” it.
+
+Do not flip StorageClass `reclaimPolicy` to Retain for this tool. The USB directory is the product. The work PVC is scratch. Retain on site-wide `lvm` hurts every other app.
 
 ---
 
@@ -249,33 +210,31 @@ If you add a new `oc` / `virtctl` call in a Job script, add the verb **before** 
 | Where | Allowed |
 | --- | --- |
 | Bastion | `bash`, `oc`, coreutils, `virtctl` (or copy from a CNV pod) |
-| Job image | whatever `openshift/cli` ships: `bash`, `oc`, `gzip`/`gunzip`, `sha256sum`, `tar`, `awk` |
+| Job image | `openshift/cli`: `bash`, `oc`, `gzip`/`gunzip`, `sha256sum`, `tar`, `awk` |
 
 Do **not** add: `jq`, `yq`, Python, Helm, Ansible, zstd, custom RPMs, a new image.
-
-To add a tool: prove it exists on disconnected RHEL 8/9 **and** in `openshift/cli`. If it does not, do not add it.
 
 ---
 
 ## 11. How to change the code without hurting a site
 
 1. Change `vm-tools/scripts/pod/` and `vm-tools/manifests/pod/` first.
-2. Mirror the same files under repo-root `scripts/pod/` and `manifests/pod/`.
-3. If you change the bundle format, bump the operator docs and HOW-TO in the same PR.
-4. Keep wrappers (`build`, `dest`, `cleanup`) stupid. Logic lives in the scripts they exec.
-5. Templates use `__TOKEN__` replacement. Do not introduce Helm or kustomize for this package.
-6. Test on a **small** disk VM before a production Windows image.
-7. After a failed test, `./cleanup` (or `./cleanup --namespace <ns>`). Then rerun. Do not stack Jobs.
+2. Mirror repo-root copies if they exist.
+3. Bundle format changes go in both Jobs + docs in the same PR.
+4. Keep wrappers (`build`, `dest`, `fetch`, `cleanup`) stupid.
+5. Test on a small disk before production Windows / TrueNAS.
+6. After a **failed** test you may `./cleanup`. After a **successful Job A** with no bastion copy, do not cleanup — `./fetch`.
 
 ### Safe vs unsafe edits
 
 | Safe | Unsafe |
 | --- | --- |
-| Log lines, comments, HOW-TO wording | New required binary |
-| gzip level `-9` → `-6` (faster, larger USB) | zstd, xz, or a second format |
-| CPU/memory defaults in `release.env` | Assuming CDI clone always works |
-| Extra `oc wait` timeouts | `virtctl stop vm <name>` (extra token) |
-| Cleanup matching more leftover names | Deleting `vm-catalog` from cleanup |
+| Log lines, HOW-TO wording | New required binary |
+| `MAX_WORK_PVC` 300Gi → 400Gi | Removing the cap |
+| gzip `-9` → `-6` | zstd / second format |
+| Extra `oc cp` retries | Deleting work PVC from cleanup before checksums |
+| Cleanup matching `xfer` | Deleting `vm-catalog` from cleanup |
+| | `virtctl stop vm <name>` |
 
 ---
 
@@ -283,94 +242,86 @@ To add a tool: prove it exists on disconnected RHEL 8/9 **and** in `openshift/cl
 
 | Symptom | Look at |
 | --- | --- |
-| `cannot create /home/data/...` | Wrong `--transfer-dir`. Use `/tmp/vm-transfer`. |
-| `virtctl stop accepts 1 arg(s), received 2` | Someone put `vm` back in the stop line. |
-| Job Pending | Work PVC node vs pod node. `lvm` RWO. |
-| Forbidden on stop/start | `subresources.kubevirt.io` missing from build Role. |
-| `quantity_to_bytes` / Invalid storage | PVC request is bare bytes. Keep the integer branch. |
-| Dest “no *.raw.gz” | Bundle is `.raw.zst` from an old build, or raw files present. |
-| Clone failed, then upload | Expected on `lvm`. Wait for upload. |
-| Work PVC full | Raw not deleted between disks, or PVC formula too small. |
-| PodSecurity restricted warnings | Usually noise if the Job still runs. Fix only if it is Denied. |
-
-Useful commands:
+| `cannot create /home/data/...` | `--transfer-dir`. Use `/tmp/vm-transfer`. |
+| Job A Complete, empty transfer dir | Copy never ran. `./fetch`. Do not cleanup. |
+| Transfer Job Pending | RWO still attached to Job A pod. Delete that pod, keep the PVC. |
+| `Requested storage (2181337249Gi)` | Cap missing or old script. Need 300Gi cap. |
+| `virtctl stop accepts 1 arg(s), received 2` | Extra `vm` token. |
+| Job Pending / FailedScheduling | Work PVC node vs pod node. |
+| Forbidden on stop/start | Build Role subresources. |
+| Dest “no *.raw.gz” | Old `.raw.zst` or raw files. |
+| Clone failed, then upload | Expected on `lvm`. |
+| Work PVC full | Raw not deleted between disks, or 300Gi too small for that gzip. |
 
 ```bash
-oc get jobs,pvc,cm,sa -n <ns> | grep abc-
-oc logs -f job/<job> -n <ns>
-oc describe job/<job> -n <ns>
-oc get virtualmachineexport -n <ns>
-oc get dv,pvc,datasource -n vm-catalog
-oc get vm,dv,pvc -n <user-project>
+oc get jobs,pvc,cm,sa,pod -n <ns> | grep abc-
+oc logs -f job/<build-job> -n <ns>
+oc get pvc <build-job>-work -n <ns>
+sha256sum -c checksums.sha256
 ```
 
 ---
 
 ## 13. Maintenance schedule
 
-These clusters do not get weekly deploys. Reviews are calendar-driven plus event-driven.
+### After every production run
 
-### After every production run (operator + one developer)
-
-- Confirm Job Completed and leftover Jobs were cleaned.
-- Confirm transfer dir has no `.raw`.
-- File the Job name, namespace, source VM, dest VM, and any WARNING lines in the site notes.
-- If clone fell back to upload, that is a note, not a ticket.
+- Job A Complete **and** transfer-dir checksums OK.
+- No `.raw` in the transfer dir.
+- Then `./cleanup --namespace <ns>`.
+- Note Job names, VM, WARNINGs (including “capped at 300Gi”).
 
 ### Monthly
 
-- Read last month’s failures. Group them (RBAC, PVC bind, export, upload, naming).
-- `oc get storageclass` on a lab cluster. Confirm the name is still `lvm`.
-- Confirm `openshift/cli:latest` still contains `gzip` and `oc`.
-- Confirm `virtctl` still accepts `stop <name> -n <ns>` (no `vm` token). CNV CLI drift is how we got burned before.
-- Grep the pod scripts for `zstd`, `jq`, `python`, `helm`. Those should not appear as required commands.
+- Failures grouped: RBAC, PVC bind, export, `oc cp`, upload, naming.
+- Confirm StorageClass name is still `lvm`.
+- Confirm `openshift/cli` still has `gzip`.
+- Confirm `virtctl stop <name> -n <ns>`.
+- Grep for `zstd`, `jq`, `python`, `helm` as required commands.
 
 ### Each OpenShift / CNV / CDI upgrade (lab first)
 
-- Full end-to-end on a tiny VM: build → checksum → dest → `oc get vm` → optional start.
-- Re-test `virtctl vmexport create|download|delete`.
-- Re-test `virtctl image-upload dv`.
-- Re-test VM stop/start subresources.
-- Check DataVolume API group is still `cdi.kubevirt.io/v1beta1` in our apply blobs. If upstream moves to v1, update both seed and deploy apply blocks.
+- Tiny VM E2E: build → fetch/checksum → dest → `oc get vm`.
+- Re-test vmexport, image-upload, stop/start subresources.
+- Confirm DataVolume API group.
 
-### Quarterly code review (senior + junior, 60–90 minutes)
+### Quarterly (senior + junior, 60–90 min)
 
-Walk this list out loud:
-
-1. Bundle contract still matches both Jobs.
-2. `vm-tools/` and `scripts/pod/` copies are identical for the files that matter.
-3. RBAC templates still cover every API call in the Job scripts.
-4. PVC formulas still match the one-disk lifecycle.
-5. Cleanup still matches Job name prefix.
-6. HOW-TO still matches flags (`--clean`, `--transfer-dir`, storage class name).
-7. No new image, no new RPM, no zstd.
-8. Legacy bastion scripts still runnable if a site cannot use Jobs.
+1. Bundle contract matches both Jobs.
+2. `vm-tools/` mirrors match.
+3. RBAC covers every Job API call.
+4. 300Gi cap still present; cleanup matches `xfer`.
+5. HOW-TO matches flags.
+6. No new image / RPM / zstd.
+7. Legacy bastion scripts still runnable.
 
 ### Yearly
 
-- Decide whether catalog clone on `lvm` is still hopeless. If LVMS or CDI gains a working clone path, dest can prefer clone and skip the gunzip fallback for **new** deploys only. Keep the fallback.
-- Revisit gzip level vs USB size. Only change level. Do not change format without a versioned bundle field.
+- Revisit whether catalog clone on `lvm` works. Keep upload fallback.
+- Revisit gzip level only. Do not change format without a versioned bundle field.
+- Revisit 300Gi cap vs real root-disk sizes.
 
 ---
 
 ## 14. Review checklist for a PR
 
-- [ ] Change is in `vm-tools/` **and** mirrored under `scripts/` / `manifests/` if those copies exist.
-- [ ] Job script and RBAC template updated together.
+- [ ] Change is in `vm-tools/` and mirrored if copies exist.
+- [ ] Job script and RBAC updated together.
 - [ ] Bundle fields documented if added/renamed.
 - [ ] No new required binary.
-- [ ] Names still DNS-safe (`k8s_name` dots → dashes).
+- [ ] `MAX_WORK_PVC` still set.
 - [ ] `virtctl stop` / `start` still name-only.
-- [ ] HOW-TO / START-HERE updated if flags or file suffixes changed.
-- [ ] Cleanup still finds the Job.
+- [ ] `./fetch` still works if copy dies after Job A.
+- [ ] Cleanup still finds `build`, `dest`, and `xfer`.
+- [ ] HOW-TO / START-HERE updated if flags changed.
 - [ ] Lab E2E on a small disk, source **and** dest.
 
 ---
 
 ## 15. What success looks like
 
-Source: Job Complete, transfer dir contains `*.raw.gz` + checksums, checksums verify, no `.raw`.
+Source: Job A Complete, Job B Running or copy finished, transfer dir has `*.raw.gz` + checksums, checksums verify, no `.raw`.
 
-Dest: Job Complete, DataSource Ready in `vm-catalog`, VM object exists in the user project, guest is stopped unless `--start`.
+Dest: Job Complete, DataSource Ready in `vm-catalog`, VM exists in the user project, guest stopped unless `--start`.
 
-That is the whole product. Everything else is plumbing so a disconnected bastion can do those two things without filling its disk.
+That is the whole product.
