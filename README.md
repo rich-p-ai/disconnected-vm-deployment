@@ -8,17 +8,17 @@ Folder: **[vm-tools/](vm-tools/)**
 Tech sheet: **[vm-tools/START-HERE.txt](vm-tools/START-HERE.txt)**  
 Operator guide: **[docs/pod-operator-guide.md](docs/pod-operator-guide.md)**
 
-Storage class on these clusters: **`LVM`**
+Storage class on these clusters: **`lvm`**
 
 ```bash
 cd vm-tools
 chmod 0750 build dest
 
 # Source cluster
-./build --namespace <src> --vm <vm> --version 0.1.0-test --storage-class LVM --transfer-dir /tmp/vm-transfer
+./build --namespace <src> --vm <vm> --version 0.1.0-test --storage-class lvm --transfer-dir /tmp/vm-transfer
 
 # Dest cluster (seed + create VM, one command)
-./dest --bundle-path /path/to/<vm>-0.1.0-test --storage-class LVM --catalog-namespace vm-catalog --namespace <project> --vm-name <new-vm>
+./dest --bundle-path /path/to/<vm>-0.1.0-test --storage-class lvm --catalog-namespace vm-catalog --namespace <project> --vm-name <new-vm>
 ```
 
 USB carries the transfer directory (`*.raw.gz` + metadata). Never copy `*.raw`.
@@ -27,7 +27,7 @@ USB carries the transfer directory (`*.raw.gz` + metadata). Never copy `*.raw`.
 
 1. Source Job exports disks and gzip-compresses them in-cluster.
 2. Bastion copies compressed files only.
-3. Dest Job seeds `vm-catalog` if needed, then creates the VM. On `LVM`, clone usually falls back to `virtctl image-upload`.
+3. Dest Job seeds `vm-catalog` if needed, then creates the VM. On `lvm`, clone usually falls back to `virtctl image-upload`.
 
 ## Legacy bastion path
 
